@@ -1,8 +1,8 @@
 local _, PCF = ...
-PCF = type(PCF) == "table" and PCF or _G.PCF or {}
+PCF = (_G.PCF_INITIALIZED and _G.PCF) or (type(PCF) == "table" and PCF) or _G.PCF or {}
 _G.PCF = PCF
 
-PCF.ChatListener = {}
+PCF.ChatListener = PCF.ChatListener or {}
 
 local cooldowns = {}
 
@@ -16,13 +16,47 @@ local function IsSelfSender(sender)
 end
 
 local function CheckCooldown(sender)
+    local key = sender or "_API_"
     local now = GetTime()
     local cooldownSec = (PCF_DB and PCF_DB.settings and PCF_DB.settings.cooldownSeconds) or 3
-    if cooldowns[sender] and (now - cooldowns[sender]) < cooldownSec then
+    if cooldowns[key] and (now - cooldowns[key]) < cooldownSec then
         return false
     end
-    cooldowns[sender] = now
+    cooldowns[key] = now
     return true
+end
+
+function PCF.ChatListener.DispatchPriceReply(itemLink, itemId, channel, target, cooldownKey)
+    if not itemLink or not itemId then return false end
+    if not CheckCooldown(cooldownKey or target or channel) then
+        return false
+    end
+
+    local price, source = PCF.ProviderRegistry.ResolvePrice(itemLink, itemId)
+    local formatted = price and PCF.Formatter.FormatMoney(price) or "No price data"
+    local responseMsg = string.format("Price check for %s: %s (%s)", itemLink, formatted, source)
+
+    local upperChannel = (channel or "GUILD"):upper()
+    if upperChannel == "WHISPER" then
+        if PCF_DB and PCF_DB.settings and PCF_DB.settings.allowWhispers == false then
+            return false
+        end
+        SendChatMessage(responseMsg, "WHISPER", nil, target)
+        return true, responseMsg
+    elseif upperChannel == "GUILD" then
+        if PCF_DB and PCF_DB.settings and PCF_DB.settings.allowGuild == false then
+            return false
+        end
+        PCF.Consensus.DispatchGuildResponse(itemId, function()
+            SendChatMessage(responseMsg, "GUILD")
+        end, source)
+        return true, responseMsg
+    elseif upperChannel == "PARTY" or upperChannel == "RAID" or upperChannel == "SAY" or upperChannel == "INSTANCE_CHAT" then
+        SendChatMessage(responseMsg, upperChannel)
+        return true, responseMsg
+    end
+
+    return false
 end
 
 local function HandleIncoming(message, sender, channel)
@@ -32,19 +66,7 @@ local function HandleIncoming(message, sender, channel)
     local itemLink, itemId = PCF.ItemParser.Parse(message)
     if not itemLink or not itemId then return end
 
-    if not CheckCooldown(sender) then return end
-
-    local price, source = PCF.ProviderRegistry.ResolvePrice(itemLink, itemId)
-    local formatted = price and PCF.Formatter.FormatMoney(price) or "No price data"
-    local responseMsg = string.format("Price check for %s: %s (%s)", itemLink, formatted, source)
-
-    if channel == "WHISPER" and PCF_DB.settings.allowWhispers then
-        SendChatMessage(responseMsg, "WHISPER", nil, sender)
-    elseif channel == "GUILD" and PCF_DB.settings.allowGuild then
-        PCF.Consensus.DispatchGuildResponse(itemId, function()
-            SendChatMessage(responseMsg, "GUILD")
-        end, source)
-    end
+    PCF.ChatListener.DispatchPriceReply(itemLink, itemId, channel, sender, sender)
 end
 
 function PCF.ChatListener.ResetCooldowns()
@@ -52,6 +74,9 @@ function PCF.ChatListener.ResetCooldowns()
 end
 
 function PCF.ChatListener.Init()
+    if PCF.ChatListener._initialized then return end
+    PCF.ChatListener._initialized = true
+
     local listenerFrame = CreateFrame("Frame")
     listenerFrame:RegisterEvent("CHAT_MSG_GUILD")
     listenerFrame:RegisterEvent("CHAT_MSG_WHISPER")

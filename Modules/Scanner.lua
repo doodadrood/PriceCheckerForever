@@ -555,27 +555,32 @@ function PCF.Scanner.StartScan()
 end
 
 -- Unified event handler for AH window lifecycle, full scan paging, and passive browse-sniffing
-scanFrame:RegisterEvent("AUCTION_HOUSE_SHOW")
-scanFrame:RegisterEvent("AUCTION_HOUSE_CLOSED")
-scanFrame:RegisterEvent("AUCTION_ITEM_LIST_UPDATE")
-scanFrame:SetScript("OnEvent", function(_, event)
-    if event == "AUCTION_HOUSE_SHOW" then
-        CreateAuctionHouseUI()
-    elseif event == "AUCTION_HOUSE_CLOSED" then
-        if isScanning then
-            PCF.Scanner.StopScan("AH closed. Scan aborted.")
+function PCF.Scanner.Init()
+    if PCF.Scanner._initialized then return end
+    PCF.Scanner._initialized = true
+
+    scanFrame:RegisterEvent("AUCTION_HOUSE_SHOW")
+    scanFrame:RegisterEvent("AUCTION_HOUSE_CLOSED")
+    scanFrame:RegisterEvent("AUCTION_ITEM_LIST_UPDATE")
+    scanFrame:SetScript("OnEvent", function(_, event)
+        if event == "AUCTION_HOUSE_SHOW" then
+            CreateAuctionHouseUI()
+        elseif event == "AUCTION_HOUSE_CLOSED" then
+            if isScanning then
+                PCF.Scanner.StopScan("AH closed. Scan aborted.")
+            end
+        elseif event == "AUCTION_ITEM_LIST_UPDATE" then
+            if isScanning then
+                ProcessPage()
+            else
+                PCF.Scanner.SniffVisiblePage()
+            end
+        elseif event == "REPLICATE_ITEM_LIST_UPDATE" then
+            if isScanning then
+                ProcessModernReplicate()
+            end
         end
-    elseif event == "AUCTION_ITEM_LIST_UPDATE" then
-        if isScanning then
-            ProcessPage()
-        else
-            PCF.Scanner.SniffVisiblePage()
-        end
-    elseif event == "REPLICATE_ITEM_LIST_UPDATE" then
-        if isScanning then
-            ProcessModernReplicate()
-        end
-    end
-end)
+    end)
+end
 
 PCF.Scanner.frame = scanFrame

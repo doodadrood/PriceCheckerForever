@@ -1,8 +1,10 @@
 local addonName, PCF = ...
-PCF = type(PCF) == "table" and PCF or _G.PCF or {}
+PCF = (_G.PCF_INITIALIZED and _G.PCF) or (type(PCF) == "table" and PCF) or _G.PCF or {}
 _G.PCF = PCF
+_G.GPC = PCF
 
-PCF_DB = PCF_DB or {}
+PCF_DB = PCF_DB or _G.GPC_DB or {}
+_G.PCF_DB = PCF_DB
 _G.GPC_DB = PCF_DB
 
 local defaultConfig = {
@@ -50,13 +52,23 @@ function PCF.HasExternalAuctionAddon()
     return false
 end
 
-function PCF.LoadConfig()
-    PCF_DB = type(PCF_DB) == "table" and PCF_DB or {}
+function PCF.LoadConfig(customDB)
+    if type(customDB) == "table" then
+        PCF_DB = customDB
+    else
+        PCF_DB = (type(_G.PCF_DB) == "table" and _G.PCF_DB)
+            or (type(_G.GPC_DB) == "table" and _G.GPC_DB)
+            or {}
+    end
+    _G.PCF_DB = PCF_DB
     _G.GPC_DB = PCF_DB
+
     ApplyDefaults(PCF_DB, defaultConfig)
 
     if PCF.HasExternalAuctionAddon() then
         PCF_DB.settings.showScanButton = false
         PCF_DB.settings.showTooltip = false
     end
+
+    return PCF_DB
 end

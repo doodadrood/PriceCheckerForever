@@ -376,6 +376,9 @@ local function ScheduleRecurringDigestCycle()
 end
 
 function PCF.MeshSync.Init()
+    if PCF.MeshSync._initialized then return end
+    PCF.MeshSync._initialized = true
+
     RegisterPrefix(SYNC_PREFIX)
     RegisterPrefix(LEGACY_SYNC_PREFIX)
     for extPrefix in pairs(EXTERNAL_PREFIXES) do

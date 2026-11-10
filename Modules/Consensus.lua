@@ -46,6 +46,9 @@ local function ComputeFreshnessPenalty(itemId, source)
 end
 
 function PCF.Consensus.Init()
+    if PCF.Consensus._initialized then return end
+    PCF.Consensus._initialized = true
+
     RegisterPrefix(SYNC_PREFIX)
     local frame = CreateFrame("Frame")
     frame:RegisterEvent("CHAT_MSG_ADDON")

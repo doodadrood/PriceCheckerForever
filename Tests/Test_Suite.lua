@@ -294,4 +294,39 @@ local refreshedCount = tocAddonTable.MeshSync.RefreshExternalAddonPrices()
 Assert(refreshedCount >= 1 and PCF_DB.prices[30001].minBuyout == 155000, "RefreshExternalAddonPrices updates cached items with latest TSM market values")
 _G.TSM_API = nil
 
+-- 12. Public Developer API (_G.PCF_API) & Double-Load Guard Tests
+Assert(_G.PCF_API ~= nil and _G.PCF_API.IsReady() == true, "PCF_API is exposed globally and IsReady() returns true")
+
+local apiPriceLink, apiSourceLink = _G.PCF_API.GetPrice("|cff1eff00|Hitem:45000:0:0:0|h[Edgemaster's Handguards]|h|r")
+Assert(apiPriceLink == 225000 and apiSourceLink == "Sniff", "PCF_API.GetPrice resolves item link and normalizes source name")
+
+local apiPriceId, apiSourceId = _G.PCF_API.GetPrice(30001)
+Assert(apiPriceId == 155000 and apiSourceId == "Sniff", "PCF_API.GetPrice resolves raw numeric item ID")
+
+PCF_DB.prices[19019] = nil
+local apiVendorPrice, apiVendorSource = _G.PCF_API.GetPrice(19019)
+Assert(apiVendorPrice == 250000 and apiVendorSource == "Vendor", "PCF_API.GetPrice resolves Vendor fallback with normalized 'Vendor' source")
+
+Assert(_G.PCF_API.FormatMoney(0) == "0c", "PCF_API.FormatMoney formats zero copper")
+Assert(_G.PCF_API.FormatMoney(85) == "85c", "PCF_API.FormatMoney formats copper-only")
+Assert(_G.PCF_API.FormatMoney(1250) == "12s 50c", "PCF_API.FormatMoney formats silver-copper")
+Assert(_G.PCF_API.FormatMoney(3501250) == "350g 12s 50c", "PCF_API.FormatMoney formats gold-silver-copper")
+
+local ts30001 = _G.PCF_API.GetPriceTimestamp(30001)
+Assert(type(ts30001) == "number" and ts30001 > 0, "PCF_API.GetPriceTimestamp returns valid epoch timestamp from PCF_DB.prices")
+Assert(_G.PCF_API.GetPriceTimestamp(999999) == nil, "PCF_API.GetPriceTimestamp returns nil for unknown item ID")
+
+Mock.currentTime = Mock.currentTime + 10.0
+local chatBeforeApi = #Mock.chatMessages
+local reqOk = _G.PCF_API.RequestPriceCheck("|cffff8000|Hitem:19019:0:0:0|h[Thunderfury]|h|r", "PARTY")
+Assert(reqOk == true and #Mock.chatMessages == chatBeforeApi + 1 and Mock.chatMessages[#Mock.chatMessages].channel == "PARTY", "PCF_API.RequestPriceCheck dispatches lookup reply to specified channel")
+
+-- Verify double-initialization guard when loaded a second time (embedded + standalone)
+local secondInitResult = PCF.Initialize()
+Assert(secondInitResult == false, "PCF.Initialize() guard prevents double initialization")
+local coreChunk = loadfile("Core.lua")
+local embeddedTable = {}
+coreChunk("ThiccUI", embeddedTable)
+Assert(embeddedTable.coreFrame == nil, "Core.lua aborts secondary ADDON_LOADED frame registration when _G.PCF_INITIALIZED is set")
+
 print("\n--- All Unit Tests Passed Successfully ---")

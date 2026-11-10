@@ -7,3 +7,4 @@ ignore:
   - .github
   - .gitignore
   - .pkgmeta
+  - README.md

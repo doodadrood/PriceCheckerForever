@@ -1,0 +1,15 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.blizzard.com/wow/ui/ ..\FrameXML\UI.xsd">
+    <Script file="Config.lua"/>
+    <Script file="Utils\Formatter.lua"/>
+    <Script file="Utils\ItemParser.lua"/>
+    <Script file="Providers\ProviderRegistry.lua"/>
+    <Script file="Providers\TSMProvider.lua"/>
+    <Script file="Providers\AuctionatorProvider.lua"/>
+    <Script file="Providers\NativeProvider.lua"/>
+    <Script file="Modules\Consensus.lua"/>
+    <Script file="Modules\MeshSync.lua"/>
+    <Script file="Modules\Scanner.lua"/>
+    <Script file="Modules\ChatListener.lua"/>
+    <Script file="Modules\Tooltip.lua"/>
+    <Script file="Core.lua"/>
+</Ui>
