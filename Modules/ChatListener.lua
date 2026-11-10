@@ -26,17 +26,7 @@ local function CheckCooldown(sender)
     return true
 end
 
-function PCF.ChatListener.DispatchPriceReply(itemLink, itemId, channel, target, cooldownKey, quantity)
-    if not itemLink or not itemId then return false end
-    if not CheckCooldown(cooldownKey or target or channel) then
-        return false
-    end
-
-    quantity = tonumber(quantity) and math.floor(tonumber(quantity)) or 1
-    if quantity < 1 then
-        quantity = 1
-    end
-
+local function BuildPriceResponse(itemLink, itemId, quantity)
     local price, source = PCF.ProviderRegistry.ResolvePrice(itemLink, itemId)
     local formatted
     if price and price > 0 then
@@ -50,7 +40,21 @@ function PCF.ChatListener.DispatchPriceReply(itemLink, itemId, channel, target, 
     else
         formatted = "No price data"
     end
-    local responseMsg = string.format("Price check for %s: %s [%s]", itemLink, formatted, source)
+    return string.format("Price check for %s: %s [%s]", itemLink, formatted, source), price, source
+end
+
+function PCF.ChatListener.DispatchPriceReply(itemLink, itemId, channel, target, cooldownKey, quantity)
+    if not itemLink or not itemId then return false end
+    if not CheckCooldown(cooldownKey or target or channel) then
+        return false
+    end
+
+    quantity = tonumber(quantity) and math.floor(tonumber(quantity)) or 1
+    if quantity < 1 then
+        quantity = 1
+    end
+
+    local responseMsg, price, source = BuildPriceResponse(itemLink, itemId, quantity)
 
     local upperChannel = (channel or "GUILD"):upper()
     if upperChannel == "WHISPER" then
@@ -63,8 +67,16 @@ function PCF.ChatListener.DispatchPriceReply(itemLink, itemId, channel, target, 
         if PCF_DB and PCF_DB.settings and PCF_DB.settings.allowGuild == false then
             return false
         end
+        -- No real AH data here (nothing, or vendor price only): ask guild peers for just this
+        -- item, whether or not we end up answering, so we have it next time.
+        local hasAHData = price and price > 0 and not (type(source) == "string" and source:find("^Vendor"))
+        if not hasAHData and PCF.MeshSync and PCF.MeshSync.RequestItem then
+            PCF.MeshSync.RequestItem(itemId)
+        end
         PCF.Consensus.DispatchGuildResponse(itemId, function()
-            SendChatMessage(responseMsg, "GUILD")
+            -- Re-resolve at send time: peer data may have arrived while we waited our turn
+            local freshMsg = BuildPriceResponse(itemLink, itemId, quantity)
+            SendChatMessage(freshMsg, "GUILD")
         end, source)
         return true, responseMsg
     elseif upperChannel == "PARTY" or upperChannel == "RAID" or upperChannel == "SAY" or upperChannel == "INSTANCE_CHAT" then
@@ -78,6 +90,18 @@ end
 local function HandleIncoming(message, sender, channel)
     if not PCF_DB or not PCF_DB.settings or not PCF_DB.settings.enabled then return end
     if IsSelfSender(sender) then return end
+
+    -- Another player's visible price reply counts as a claim, so we stay quiet even if
+    -- their addon-channel CLAIM message was missed or delayed.
+    if channel == "GUILD" and type(message) == "string" then
+        local repliedItemId = message:match("^Price check for .-item:(%d+)")
+        if repliedItemId then
+            if PCF.Consensus and PCF.Consensus.RegisterClaim then
+                PCF.Consensus.RegisterClaim(tonumber(repliedItemId))
+            end
+            return
+        end
+    end
 
     local itemLink, itemId, quantity = PCF.ItemParser.Parse(message)
     if not itemLink or not itemId then return end

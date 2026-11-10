@@ -140,6 +140,56 @@ Assert(
 )
 PCF_DB.prices[2450] = nil
 PCF_DB.lastFullScan = 0
+
+-- Guild consensus: claims are keyed by item only (GetTime() differs on every machine, so no clock in the key)
+Mock.currentTime = 2000.0
+PCF.ChatListener.frame:Trigger("CHAT_MSG_GUILD", "? |cffff8000|Hitem:19019:0:0:0|h[Thunderfury]|h|r", "GuildMate")
+local itemClaimTimer = Mock.timers[#Mock.timers]
+local chatBeforeItemClaim = #Mock.chatMessages
+PCF.Consensus.frame:Trigger("CHAT_MSG_ADDON", "PCF_SYNC", "CLAIM:19019", "GUILD", "OtherNode")
+itemClaimTimer.callback()
+Assert(#Mock.chatMessages == chatBeforeItemClaim, "Suppress Guild chat response on item-only CLAIM payload")
+
+-- A visible reply from another player also counts as a claim
+Mock.currentTime = 2100.0
+local timersBeforeVisible = #Mock.timers
+PCF.ChatListener.frame:Trigger("CHAT_MSG_GUILD", "Price check for |cffff8000|Hitem:19019:0:0:0|h[Thunderfury]|h|r: 50g 00s 00c [Native AH Scan (1h ago)]", "OtherNode")
+PCF.ChatListener.frame:Trigger("CHAT_MSG_GUILD", "? |cffff8000|Hitem:19019:0:0:0|h[Thunderfury]|h|r", "GuildMate")
+Assert(#Mock.timers == timersBeforeVisible, "Stay silent when another player's price reply was already seen in guild chat")
+
+-- Players with no data wait their turn (>= 3s) and ask peers for just that item
+Mock.currentTime = 2200.0
+local mysteryLink = "|cffffffff|Hitem:77001:0:0:0|h[Mystery Item]|h|r"
+local timersBeforeNoData, addonMsgsBeforeNoData = #Mock.timers, #Mock.addonMessages
+PCF.ChatListener.frame:Trigger("CHAT_MSG_GUILD", "? " .. mysteryLink, "GuildMate")
+local noDataTimer
+for i = timersBeforeNoData + 1, #Mock.timers do
+    if Mock.timers[i].delay >= 3.0 then noDataTimer = Mock.timers[i] end
+end
+Assert(noDataTimer ~= nil, "Players with no data wait at least 3s before answering a guild price check")
+for i = timersBeforeNoData + 1, #Mock.timers do
+    if Mock.timers[i].delay < 1.0 then Mock.timers[i].callback() end
+end
+local sentReqItem = false
+for i = addonMsgsBeforeNoData + 1, #Mock.addonMessages do
+    if Mock.addonMessages[i].msg == "REQ_ITEM:77001" and Mock.addonMessages[i].prefix == "PCF_SYNC" then sentReqItem = true end
+end
+Assert(sentReqItem, "No-data guild price check broadcasts REQ_ITEM for just that item")
+
+-- Same item again: no repeat REQ_ITEM within the 5 minute per-item cooldown (only the answer timer is added)
+Mock.currentTime = 2210.0
+local timersBeforeRepeat = #Mock.timers
+PCF.ChatListener.frame:Trigger("CHAT_MSG_GUILD", "? " .. mysteryLink, "GuildMate2")
+Assert(#Mock.timers == timersBeforeRepeat + 1, "Do not re-request the same item within the per-item cooldown")
+
+-- If peer data arrives while waiting, the delayed reply uses it (price is re-resolved at send time)
+PCF.MeshSync.ApplyDeltaPayload(string.format("DELTA:77001:5000:%d", time() - 100))
+local chatBeforeLate = #Mock.chatMessages
+noDataTimer.callback()
+local lateReply = Mock.chatMessages[#Mock.chatMessages]
+Assert(#Mock.chatMessages == chatBeforeLate + 1 and lateReply.channel == "GUILD" and lateReply.msg:find("50s", 1, true) and lateReply.msg:find("PCF Mesh", 1, true), "Delayed guild reply uses peer data that arrived while waiting")
+PCF_DB.prices[77001] = nil
+
 _G.TSM_API, _G.Auctionator = savedTSM, savedAuc
 
 -- 6. AH Scanner, UI Button, Progress Bar & TOC Loader Integration Test
@@ -228,12 +278,81 @@ _G.C_AuctionHouse = {
         return true
     end,
 }
-Mock.currentTime = Mock.currentTime + 540 -- 9 minutes after previous scan (< 15m ReplicateItems cooldown)
+Mock.currentTime = Mock.currentTime + 540 -- 9 minutes after previous scan
+PCF_DB.lastReplicateScan = time() - 540 -- a real ReplicateItems scan ran 9 minutes ago (< 15m server cooldown)
 tocAddonTable.Scanner.scanButton:Click()
 Assert(browseQueryCalled == true, "Use C_AuctionHouse.SendBrowseQuery when ReplicateItems is within 15-minute cooldown")
 tocAddonTable.Scanner.frame:Trigger("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
 Assert(tocAddonTable.Scanner.scanButton:GetText() == "PCF Scan", "Browse-all scan completes cleanly without hanging")
 Assert(PCF_DB.prices[13468] and PCF_DB.prices[13468].minBuyout == 42000, "Browse-all scan records item minPrice accurately")
+
+-- Replicate-first API scan: waits for REPLICATE_ITEM_LIST_UPDATE and only falls back to browse after the timeout
+local replicateCalls, replicateBrowseCalls = 0, 0
+local replicateData = {}
+_G.C_AuctionHouse = {
+    ReplicateItems = function() replicateCalls = replicateCalls + 1 end,
+    SendBrowseQuery = function() replicateBrowseCalls = replicateBrowseCalls + 1 end,
+    GetBrowseResults = function() return {} end,
+    HasFullBrowseResults = function() return true end,
+    GetNumReplicateItems = function() return #replicateData end,
+    GetReplicateItemInfo = function(index)
+        local e = replicateData[index + 1]
+        return nil, nil, e.count, 1, nil, 1, nil, e.minBid, 0, e.buyoutPrice, 0, nil, 0, nil, nil, 0, e.itemId
+    end,
+}
+local scanner = tocAddonTable.Scanner
+local function FindTimerByDelay(delay, startIndex)
+    for i = #Mock.timers, startIndex, -1 do
+        if Mock.timers[i].delay == delay then return Mock.timers[i] end
+    end
+end
+
+-- A. API data arrives: processed without ever starting browse pagination
+PCF_DB.lastReplicateScan = 0
+replicateData = { { count = 1, minBid = 900, buyoutPrice = 1000, itemId = 14001 } }
+scanner.scanButton:Click()
+Assert(replicateCalls == 1 and replicateBrowseCalls == 0, "Replicate-first scan calls ReplicateItems without starting browse pagination")
+scanner.frame:Trigger("REPLICATE_ITEM_LIST_UPDATE")
+Assert(PCF_DB.prices[14001] and PCF_DB.prices[14001].minBuyout == 1000 and scanner.scanButton:GetText() == "PCF Scan", "Replicate scan records API data and completes")
+Assert(PCF_DB.lastReplicateScan > 0, "Replicate scan stamps lastReplicateScan")
+
+-- B. An empty first REPLICATE_ITEM_LIST_UPDATE keeps waiting instead of dropping to browse
+PCF_DB.lastReplicateScan = 0
+replicateData = {}
+scanner.scanButton:Click()
+scanner.frame:Trigger("REPLICATE_ITEM_LIST_UPDATE")
+Assert(replicateBrowseCalls == 0 and scanner.scanButton:GetText() == "Stop Scan", "Empty first REPLICATE_ITEM_LIST_UPDATE keeps waiting instead of falling back to browse")
+replicateData = { { count = 2, minBid = 1800, buyoutPrice = 2000, itemId = 14002 } }
+scanner.frame:Trigger("REPLICATE_ITEM_LIST_UPDATE")
+Assert(PCF_DB.prices[14002] and PCF_DB.prices[14002].minBuyout == 1000 and scanner.scanButton:GetText() == "PCF Scan", "Replicate scan completes once real data follows an empty update")
+
+-- C. Timeout falls back to browse (after 15s), but late API data still takes over
+PCF_DB.lastReplicateScan = 0
+replicateData = {}
+local timersBeforeC = #Mock.timers
+scanner.scanButton:Click()
+local timeoutTimer = FindTimerByDelay(15.0, timersBeforeC + 1)
+Assert(timeoutTimer ~= nil, "Replicate scan waits 15s for API data before falling back")
+timeoutTimer.callback()
+Assert(replicateBrowseCalls == 1 and scanner.scanButton:GetText() == "Stop Scan", "Fall back to browse scan after replicate timeout")
+replicateData = { { count = 1, minBid = 7000, buyoutPrice = 7500, itemId = 14003 } }
+scanner.frame:Trigger("REPLICATE_ITEM_LIST_UPDATE")
+Assert(PCF_DB.prices[14003] and PCF_DB.prices[14003].minBuyout == 7500 and scanner.scanButton:GetText() == "PCF Scan", "Late API data takes over from the browse fallback")
+
+-- D. A timed-out replicate still burned the server cooldown: an immediate retry goes straight to browse
+PCF_DB.lastReplicateScan = 0
+replicateData = {}
+local timersBeforeD = #Mock.timers
+scanner.scanButton:Click()
+local callsAfterRequest = replicateCalls
+FindTimerByDelay(15.0, timersBeforeD + 1).callback()
+scanner.scanButton:Click() -- Stop Scan
+Assert(scanner.scanButton:GetText() == "PCF Scan", "Stop Scan aborts the browse fallback")
+local browseBeforeRetry = replicateBrowseCalls
+scanner.scanButton:Click()
+Assert(replicateCalls == callsAfterRequest and replicateBrowseCalls == browseBeforeRetry + 1, "Retry after a timed-out replicate goes straight to browse")
+scanner.frame:Trigger("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
+Assert(scanner.scanButton:GetText() == "PCF Scan", "Browse retry completes cleanly")
 _G.C_AuctionHouse = nil
 _G.QueryAuctionItems = savedQueryAuctionItems
 
@@ -368,6 +487,32 @@ Assert(sent2 == false and #Mock.addonMessages == msgCountBefore + 1, "Suppress d
 Mock.currentTime = Mock.currentTime + 1300 -- Now > 30 minutes (1900s total) elapsed
 local sent3 = tocAddonTable.MeshSync.RequestDigest(false)
 Assert(sent3 == true and #Mock.addonMessages == msgCountBefore + 2, "Allow REQ_DIGEST after 30-minute cooldown expires")
+
+-- Targeted REQ_ITEM: peers holding the item answer with a DELTA covering only that item
+tocAddonTable.MeshSync.ResetCooldowns()
+PCF_DB.prices[88001] = { minBuyout = 4242, minBid = 4242, lastUpdated = math.floor(Mock.currentTime), count = 1, source = "Scan" }
+PCF_DB.prices[88002] = { minBuyout = 4300, minBid = 4300, lastUpdated = math.floor(Mock.currentTime), count = 1, source = "Scan" }
+local reqMsgsBefore = #Mock.addonMessages
+tocAddonTable.MeshSync.frame:Trigger("CHAT_MSG_ADDON", "PCF_SYNC", "REQ_ITEM:88001", "GUILD", "OtherGuildie")
+Mock.timers[#Mock.timers].callback()
+local reqReply = Mock.addonMessages[#Mock.addonMessages]
+Assert(#Mock.addonMessages == reqMsgsBefore + 1 and reqReply.msg:find("^DELTA:88001:4242:") ~= nil and reqReply.msg:find("88002", 1, true) == nil, "Answer REQ_ITEM with a DELTA covering only the requested item")
+
+-- Another peer's DELTA for the same item suppresses our pending answer
+tocAddonTable.MeshSync.ResetCooldowns()
+reqMsgsBefore = #Mock.addonMessages
+tocAddonTable.MeshSync.frame:Trigger("CHAT_MSG_ADDON", "PCF_SYNC", "REQ_ITEM:88002", "GUILD", "OtherGuildie")
+local suppressedReplyTimer = Mock.timers[#Mock.timers]
+tocAddonTable.MeshSync.frame:Trigger("CHAT_MSG_ADDON", "PCF_SYNC", string.format("DELTA:88002:4300:%d", time()), "GUILD", "AnotherPeer")
+suppressedReplyTimer.callback()
+Assert(#Mock.addonMessages == reqMsgsBefore, "Suppress REQ_ITEM answer when another peer's DELTA already covers the item")
+
+-- Peers without data for the item stay silent
+tocAddonTable.MeshSync.ResetCooldowns()
+local timersBeforeNoDataReq = #Mock.timers
+tocAddonTable.MeshSync.frame:Trigger("CHAT_MSG_ADDON", "PCF_SYNC", "REQ_ITEM:99999999", "GUILD", "OtherGuildie")
+Assert(#Mock.timers == timersBeforeNoDataReq, "Do not answer REQ_ITEM for items we have no data on")
+PCF_DB.prices[88001], PCF_DB.prices[88002] = nil, nil
 
 -- 11. Local TSM / Auctionator -> Mesh Bridge & Background Refresh Tests
 _G.TSM_API = {

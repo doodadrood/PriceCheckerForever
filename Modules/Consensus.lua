@@ -6,6 +6,13 @@ PCF.Consensus = {}
 
 local SYNC_PREFIX = "PCF_SYNC"
 local SIX_HOURS_SECONDS = 6 * 3600
+local CLAIM_WINDOW_SECONDS = 60 -- how long a claim on an item suppresses other responders
+local VENDOR_ONLY_DELAY = 2.0   -- vendor-price-only nodes yield to nodes holding real AH data
+local NO_DATA_DELAY = 3.0       -- nodes with nothing yield to everyone; they only answer if nobody else did
+
+-- [itemId] = GetTime() (local clock) at which a claim was made or seen.
+-- Claims are keyed by itemId only: GetTime() differs on every machine, so it must never
+-- be part of anything compared across clients.
 local activeClaims = {}
 
 local function RegisterPrefix(prefix)
@@ -42,7 +49,37 @@ local function ComputeFreshnessPenalty(itemId, source)
             return 0.00
         end
     end
-    return 0.20
+    return 1.00 -- stale data: yield to nodes with fresh data
+end
+
+-- Lower delay = answers first. Real AH data beats vendor-only data, which beats "No Data".
+local function ComputeResponseDelay(itemId, source)
+    if source == nil or source == "No Data" then
+        -- Wide spread so the first responder's CLAIM reaches the others before they fire
+        return NO_DATA_DELAY + (math.random(0, 2000) / 1000)
+    end
+    if type(source) == "string" and source:find("^Vendor") then
+        return VENDOR_ONLY_DELAY + (math.random(0, 1000) / 1000)
+    end
+    return ComputeFreshnessPenalty(itemId, source) + (math.random(50, 1000) / 1000)
+end
+
+local function IsClaimed(itemId)
+    local claimedAt = activeClaims[itemId]
+    if not claimedAt then
+        return false
+    end
+    if (GetTime() - claimedAt) < CLAIM_WINDOW_SECONDS then
+        return true
+    end
+    activeClaims[itemId] = nil
+    return false
+end
+
+-- Accepts "<itemId>" and the legacy "<itemId>_<timeBucket>" payload from older versions.
+local function ParseClaimItemId(payload)
+    if type(payload) ~= "string" then return nil end
+    return tonumber(payload:match("^(%d+)"))
 end
 
 function PCF.Consensus.Init()
@@ -54,9 +91,12 @@ function PCF.Consensus.Init()
     frame:RegisterEvent("CHAT_MSG_ADDON")
     frame:SetScript("OnEvent", function(_, _, prefix, message, channel, sender)
         if prefix ~= SYNC_PREFIX then return end
-        local action, hash = ParseClaimMessage(message)
-        if action == "CLAIM" and hash then
-            activeClaims[hash] = true
+        local action, payload = ParseClaimMessage(message)
+        if action == "CLAIM" then
+            local claimedItemId = ParseClaimItemId(payload)
+            if claimedItemId then
+                activeClaims[claimedItemId] = GetTime()
+            end
         end
     end)
     PCF.Consensus.frame = frame
@@ -66,25 +106,26 @@ function PCF.Consensus.ResetClaims()
     activeClaims = {}
 end
 
-function PCF.Consensus.DispatchGuildResponse(itemId, dispatchCallback, source)
-    -- Hash key based on ItemID and a 60-second time slice
-    local timeBucket = math.floor(GetTime() / 60)
-    local hash = string.format("%d_%d", itemId, timeBucket)
+-- Records that someone else already answered for this item (e.g. seen in guild chat).
+function PCF.Consensus.RegisterClaim(itemId)
+    itemId = tonumber(itemId)
+    if itemId and itemId > 0 then
+        activeClaims[itemId] = GetTime()
+    end
+end
 
-    if activeClaims[hash] then
+function PCF.Consensus.DispatchGuildResponse(itemId, dispatchCallback, source)
+    if IsClaimed(itemId) then
         return -- Already claimed by another node
     end
 
-    -- Delay = FreshnessPenalty (0.00s or 0.20s) + RandomJitter (0.050s to 0.200s)
-    local freshnessPenalty = ComputeFreshnessPenalty(itemId, source)
-    local randomJitter = math.random(50, 200) / 1000
-    local delay = freshnessPenalty + randomJitter
+    local delay = ComputeResponseDelay(itemId, source)
 
     C_Timer.After(delay, function()
-        if not activeClaims[hash] then
+        if not IsClaimed(itemId) then
             -- Broadcast claim to suppress other guild members
-            activeClaims[hash] = true
-            SendAddonMsg(SYNC_PREFIX, "CLAIM:" .. hash, "GUILD")
+            activeClaims[itemId] = GetTime()
+            SendAddonMsg(SYNC_PREFIX, "CLAIM:" .. itemId, "GUILD")
             dispatchCallback()
         end
     end)

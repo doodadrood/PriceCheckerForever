@@ -23,6 +23,7 @@ local defaultConfig = {
     },
     prices = {}, -- [itemId] = { minBuyout = 0, minBid = 0, lastUpdated = 0, count = 0, source = "Scan" }
     lastFullScan = 0,
+    lastReplicateScan = 0,
     lastPeerSync = 0,
 }
 

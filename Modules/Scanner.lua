@@ -12,6 +12,9 @@ local activeScanToken = 0
 local browseProcessedCount = 0
 local browseEstimatedTotal = 0
 local REPLICATE_COOLDOWN_SECONDS = 900
+local REPLICATE_TIMEOUT_SECONDS = 15.0
+local replicatePending = false   -- ReplicateItems() requested, data not yet processed
+local replicateRequestedAt = nil -- session-only: when we last called ReplicateItems()
 
 local scanFrame = CreateFrame("Frame")
 local scanPage = 0
@@ -660,6 +663,7 @@ local function FinishScan()
     isScanning = false
     isBrowseScanning = false
     waitingForPage = false
+    replicatePending = false
     timerPending = false
     activeScanToken = activeScanToken + 1
     SafeUnregisterScanEvents()
@@ -757,7 +761,8 @@ local function StartModernBrowseScan()
     uniqueItemsScanned = 0
     scanStartTime = GetTime()
     seenInScan = {}
-    SafeUnregisterEvent(scanFrame, "REPLICATE_ITEM_LIST_UPDATE")
+    -- NOTE: REPLICATE_ITEM_LIST_UPDATE stays registered if a replicate request is still
+    -- pending, so late API data can take over from this page-by-page fallback.
     UpdateScanUI("SCANNING", "Querying AH items...")
 
     local sortOrder = (Enum and Enum.AuctionHouseSortOrder and Enum.AuctionHouseSortOrder.Price) or 0
@@ -852,28 +857,57 @@ local function ProcessModernBrowseBatch(addedResults)
     end
 end
 
+local function ScheduleReplicateWaitUI(token)
+    C_Timer.After(1.0, function()
+        if not isScanning or not replicatePending or isBrowseScanning or activeScanToken ~= token then
+            return
+        end
+        local elapsed = math.floor(GetTime() - scanStartTime)
+        UpdateScanUI("SCANNING", string.format("Waiting for AH data... (%ds)", elapsed))
+        ScheduleReplicateWaitUI(token)
+    end)
+end
+
 local function ProcessModernReplicate()
-    if not isScanning or not waitingForPage then
+    if not isScanning or not replicatePending then
         return
     end
-    waitingForPage = false
-    isBrowseScanning = false
-    SafeUnregisterEvent(scanFrame, "REPLICATE_ITEM_LIST_UPDATE")
 
     if not C_AuctionHouse or not C_AuctionHouse.GetNumReplicateItems then
-        FinishScan()
+        replicatePending = false
+        SafeUnregisterEvent(scanFrame, "REPLICATE_ITEM_LIST_UPDATE")
+        if not isBrowseScanning then
+            if C_AuctionHouse and C_AuctionHouse.SendBrowseQuery then
+                StartModernBrowseScan()
+            else
+                FinishScan()
+            end
+        end
         return
     end
 
     local numItems = C_AuctionHouse.GetNumReplicateItems() or 0
-    if numItems <= 0 and C_AuctionHouse.SendBrowseQuery then
-        StartModernBrowseScan()
+    if numItems <= 0 then
+        -- Data may still be streaming in. Keep listening for the next
+        -- REPLICATE_ITEM_LIST_UPDATE; the timeout decides when to fall back to browse.
         return
     end
+
+    -- Real data arrived: stop listening and take over from any browse fallback.
+    replicatePending = false
+    replicateRequestedAt = nil
+    SafeUnregisterEvent(scanFrame, "REPLICATE_ITEM_LIST_UPDATE")
+    waitingForPage = false
+    isBrowseScanning = false
+    timerPending = false
+    activeScanToken = activeScanToken + 1 -- cancels browse watchdog / pending timers
+    seenInScan = {}                        -- replicate data replaces anything browse recorded
+    uniqueItemsScanned = 0
 
     PCF_DB = PCF_DB or {}
     PCF_DB.lastReplicateScan = time()
     totalAuctionsCount = numItems
+    scannedAuctionsCount = 0
     local batchSize = 500
     totalPages = math.max(1, math.ceil(numItems / batchSize))
     scanPage = 0
@@ -921,6 +955,7 @@ function PCF.Scanner.StopScan(reason)
     isScanning = false
     isBrowseScanning = false
     waitingForPage = false
+    replicatePending = false
     timerPending = false
     activeScanToken = activeScanToken + 1
     SafeUnregisterScanEvents()
@@ -943,17 +978,23 @@ function PCF.Scanner.StartScan()
 
     -- Modern C_AuctionHouse path if legacy QueryAuctionItems is unavailable
     if not QueryAuctionItems and C_AuctionHouse then
-        local lastReplicate = math.max(
-            (PCF_DB and PCF_DB.lastReplicateScan) or 0,
-            (PCF_DB and PCF_DB.lastFullScan) or 0
-        )
-        local replicateReady = C_AuctionHouse.ReplicateItems ~= nil
-            and (lastReplicate <= 0 or (time() - lastReplicate) >= REPLICATE_COOLDOWN_SECONDS)
+        local nowTs = time()
+        local lastReplicate = (PCF_DB and PCF_DB.lastReplicateScan) or 0
+        local cooldownOver = lastReplicate <= 0
+            or nowTs < lastReplicate
+            or (nowTs - lastReplicate) >= REPLICATE_COOLDOWN_SECONDS
+        -- Session guard: a request that timed out / was cancelled still burned the server cooldown
+        local requestOver = replicateRequestedAt == nil
+            or nowTs < replicateRequestedAt
+            or (nowTs - replicateRequestedAt) >= REPLICATE_COOLDOWN_SECONDS
+        local replicateReady = C_AuctionHouse.ReplicateItems ~= nil and cooldownOver and requestOver
 
         if replicateReady then
             isScanning = true
             isBrowseScanning = false
-            waitingForPage = true
+            waitingForPage = false
+            replicatePending = true
+            replicateRequestedAt = nowTs
             timerPending = false
             activeScanToken = activeScanToken + 1
             local myToken = activeScanToken
@@ -967,16 +1008,29 @@ function PCF.Scanner.StartScan()
             UpdateScanUI("SCANNING", "Requesting AH data...")
 
             SafeRegisterEvent(scanFrame, "REPLICATE_ITEM_LIST_UPDATE")
-            C_AuctionHouse.ReplicateItems()
+            local okReplicate = pcall(C_AuctionHouse.ReplicateItems)
             print("|cff00ff00[PCF]|r Starting full AH scan...")
 
-            -- Fallback: if REPLICATE_ITEM_LIST_UPDATE is throttled by the server,
-            -- automatically switch to browse-all pagination after 3 seconds.
-            C_Timer.After(3.0, function()
-                if isScanning and waitingForPage and not isBrowseScanning and activeScanToken == myToken then
+            if not okReplicate then
+                replicatePending = false
+                SafeUnregisterEvent(scanFrame, "REPLICATE_ITEM_LIST_UPDATE")
+                if C_AuctionHouse.SendBrowseQuery then
+                    StartModernBrowseScan()
+                else
+                    PCF.Scanner.StopScan("AH scan unavailable — try again in a moment")
+                end
+                return
+            end
+
+            -- Fallback: if the server is slow to answer, start the page-by-page scan,
+            -- but keep listening: if the API data arrives later it takes over.
+            C_Timer.After(REPLICATE_TIMEOUT_SECONDS, function()
+                if isScanning and replicatePending and not isBrowseScanning and activeScanToken == myToken then
+                    print("|cffff9900[PCF]|r AH API data is slow; scanning page-by-page (will switch to API data if it arrives).")
                     StartModernBrowseScan()
                 end
             end)
+            ScheduleReplicateWaitUI(myToken)
             return
         elseif C_AuctionHouse.SendBrowseQuery then
             print("|cff00ff00[PCF]|r Starting full AH scan...")

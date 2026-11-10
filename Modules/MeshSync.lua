@@ -31,6 +31,16 @@ local queueDrainPending = false
 local heartbeatPending = false
 local recurringDigestScheduled = false
 
+-- Targeted single-item sync ("REQ_ITEM:<itemId>") used when a guild price check hits an item
+-- this node has no AH data for. Peers holding data answer with a normal DELTA for just that item.
+local ITEM_REQUEST_COOLDOWN_SEC = 300 -- don't re-ask for the same item more often than this
+local ITEM_REQUEST_SUPPRESS_SEC = 10  -- skip our request if a peer asked for the same item this recently
+local ITEM_REPLY_DEDUPE_SEC = 30      -- don't answer the same item request twice within this window
+local itemRequestSent = {}  -- [itemId] = GetTime() we last asked
+local itemRequestSeen = {}  -- [itemId] = GetTime() we last saw a peer ask
+local itemReplyToken = {}   -- [itemId] = counter; bumped when a peer's DELTA covers the item
+local itemReplySent = {}    -- [itemId] = GetTime() we last answered
+
 local function RegisterPrefix(prefix)
     if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
         C_ChatInfo.RegisterAddonMessagePrefix(prefix)
@@ -310,6 +320,35 @@ function PCF.MeshSync.RequestDigest(force)
     return true
 end
 
+-- Asks guild peers for fresh data on one specific item (cheap alternative to a full digest).
+function PCF.MeshSync.RequestItem(itemId)
+    if not PCF_DB or not PCF_DB.settings or PCF_DB.settings.enablePeerSync == false then
+        return false
+    end
+    itemId = tonumber(itemId)
+    if not itemId or itemId <= 0 then
+        return false
+    end
+
+    local now = GetTime()
+    local lastSent = itemRequestSent[itemId]
+    if lastSent and (now - lastSent) < ITEM_REQUEST_COOLDOWN_SEC then
+        return false
+    end
+    itemRequestSent[itemId] = now
+
+    -- Small random backoff: if several nodes lack the item, the first request covers everyone
+    local backoff = 0.05 + (math.random(0, 250) / 1000)
+    C_Timer.After(backoff, function()
+        local seenAt = itemRequestSeen[itemId]
+        if seenAt and (GetTime() - seenAt) < ITEM_REQUEST_SUPPRESS_SEC then
+            return -- a peer already asked; their DELTA reply serves us too
+        end
+        SendAddonMsg(SYNC_PREFIX, "REQ_ITEM:" .. itemId, "GUILD")
+    end)
+    return true
+end
+
 function PCF.MeshSync.ResetCooldowns()
     lastDigestRequestTime = -DIGEST_COOLDOWN_SEC
     pendingDigestReplyId = pendingDigestReplyId + 1
@@ -320,6 +359,10 @@ function PCF.MeshSync.ResetCooldowns()
     queueTail = 0
     queueDrainPending = false
     heartbeatPending = false
+    itemRequestSent = {}
+    itemRequestSeen = {}
+    itemReplyToken = {}
+    itemReplySent = {}
 end
 
 local function HandleSyncMessage(prefix, message, channel, sender)
@@ -360,9 +403,44 @@ local function HandleSyncMessage(prefix, message, channel, sender)
         return
     end
 
+    local reqItemStr = message:match("^REQ_ITEM:(%d+)$")
+    if reqItemStr then
+        local reqItemId = tonumber(reqItemStr)
+        local now = GetTime()
+        itemRequestSeen[reqItemId] = now
+
+        local entry = PCF_DB.prices and PCF_DB.prices[reqItemId]
+        if entry and entry.minBuyout and entry.minBuyout > 0 then
+            local lastReply = itemReplySent[reqItemId]
+            if lastReply and (now - lastReply) < ITEM_REPLY_DEDUPE_SEC then
+                return
+            end
+            itemReplyToken[reqItemId] = (itemReplyToken[reqItemId] or 0) + 1
+            local myToken = itemReplyToken[reqItemId]
+            local backoff = 0.15 + (math.random(0, 450) / 1000)
+
+            C_Timer.After(backoff, function()
+                if itemReplyToken[reqItemId] ~= myToken then
+                    return -- another peer already answered with a DELTA covering this item
+                end
+                itemReplySent[reqItemId] = GetTime()
+                local chunks = PCF.MeshSync.BuildDeltaChunks(0, { [reqItemId] = true })
+                EnqueueOutboundMessages(chunks, true)
+            end)
+        end
+        return
+    end
+
     if message:find("^DELTA:") then
         -- Suppress our pending digest election timer if another peer is already answering
         pendingDigestReplyId = pendingDigestReplyId + 1
+        -- ...and any pending single-item answers this DELTA already covers
+        for idStr in message:gmatch("(%d+):%d+:%d+") do
+            local coveredId = tonumber(idStr)
+            if coveredId and itemReplyToken[coveredId] then
+                itemReplyToken[coveredId] = itemReplyToken[coveredId] + 1
+            end
+        end
         PCF.MeshSync.ApplyDeltaPayload(message)
     end
 end
