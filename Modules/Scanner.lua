@@ -39,10 +39,25 @@ local function CountDatabaseItems()
     return n
 end
 
+local function IsScanButtonEnabled()
+    if PCF_DB and PCF_DB.settings and PCF_DB.settings.showScanButton == false then
+        return false
+    end
+    return true
+end
+
 local function UpdateScanUI(state, messageOverride)
     if not uiCreated or not scanButton or not progressBar or not progressText then
         return
     end
+
+    if not IsScanButtonEnabled() then
+        scanButton:Hide()
+        statusContainer:Hide()
+        return
+    end
+
+    scanButton:Show()
 
     if state == "SCANNING" then
         scanButton:SetText("Stop Scan")
@@ -110,10 +125,20 @@ local function UpdateScanUI(state, messageOverride)
 end
 
 local function CreateAuctionHouseUI()
+    if not IsScanButtonEnabled() then
+        if uiCreated then
+            if scanButton then scanButton:Hide() end
+            if statusContainer then statusContainer:Hide() end
+        end
+        return
+    end
+
     local parent = _G.AuctionFrame or _G.AuctionHouseFrame
     if not parent then return end
 
     if uiCreated and scanButton and scanButton.GetParent and scanButton:GetParent() == parent then
+        scanButton:Show()
+        statusContainer:Show()
         UpdateScanUI(isScanning and "SCANNING" or "IDLE")
         return
     end
@@ -361,6 +386,18 @@ local function ProcessModernReplicate()
     ProcessBatch()
 end
 
+function PCF.Scanner.UpdateVisibility()
+    if IsScanButtonEnabled() then
+        CreateAuctionHouseUI()
+    else
+        if isScanning then
+            PCF.Scanner.StopScan("Scan stopped (AH scan button disabled).")
+        end
+        if scanButton then scanButton:Hide() end
+        if statusContainer then statusContainer:Hide() end
+    end
+end
+
 function PCF.Scanner.StopScan(reason)
     if not isScanning then return end
     isScanning = false
@@ -371,6 +408,11 @@ function PCF.Scanner.StopScan(reason)
 end
 
 function PCF.Scanner.StartScan()
+    if not IsScanButtonEnabled() then
+        print("|cffff0000[PCF]|r AH scanning is disabled. Use /pcf button to enable.")
+        return
+    end
+
     CreateAuctionHouseUI()
 
     if isScanning then

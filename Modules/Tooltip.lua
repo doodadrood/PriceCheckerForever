@@ -58,6 +58,9 @@ end
 
 function PCF.Tooltip.OnTooltipSetItem(tooltip, tooltipData)
     if not tooltip then return end
+    if PCF_DB and PCF_DB.settings and PCF_DB.settings.showTooltip == false then
+        return
+    end
     local itemLink, itemId = ExtractItemFromTooltip(tooltip, tooltipData)
     if not itemLink and not itemId then return end
 

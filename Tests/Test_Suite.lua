@@ -135,10 +135,26 @@ end
 tocAddonTable.coreFrame:Trigger("ADDON_LOADED", "PriceCheckerForever")
 Assert(type(SlashCmdList["PRICECHECKERFOREVER"]) == "function" and SLASH_PRICECHECKERFOREVER1 == "/pcf", "Register /pcf slash command on ADDON_LOADED")
 
--- Simulate opening Auction House window
+-- Verify auto-disable of scan button & tooltip when TSM/Auctionator are detected
+Assert(PCF_DB.settings.showScanButton == false and PCF_DB.settings.showTooltip == false, "Auto-disable AH scan button and tooltip when TSM/Auctionator are installed")
+
 tocAddonTable.Scanner.frame:Trigger("AUCTION_HOUSE_SHOW")
-Assert(tocAddonTable.Scanner.scanButton ~= nil, "Create 'PCF Scan' button on AuctionFrame when AH opens")
+Assert(tocAddonTable.Scanner.scanButton == nil, "Prevent AH scan button creation when showScanButton is off")
+
+_G.GameTooltip:ClearLines()
+_G.GameTooltip:AddLine("Linen Cloth")
+_G.GameTooltip:AddLine("Sell Price: 3s3c")
+_G.GameTooltip:SetItem("Linen Cloth", "|cffffffff|Hitem:2589:0:0:0|h[Linen Cloth]|h|r")
+Assert(_G.GameTooltip.lines[#_G.GameTooltip.lines] == "Sell Price: 3s3c", "Prevent tooltip AH Price line when showTooltip is off")
+
+-- Enable scan button via /pcf button and tooltip via /pcf tooltip
+SlashCmdList["PRICECHECKERFOREVER"]("button")
+Assert(PCF_DB.settings.showScanButton == true, "/pcf button toggles showScanButton ON")
+Assert(tocAddonTable.Scanner.scanButton ~= nil and tocAddonTable.Scanner.scanButton.shown == true, "Create and show 'PCF Scan' button on AuctionFrame when toggled ON")
 Assert(tocAddonTable.Scanner.scanButton:GetText() == "PCF Scan", "Initial AH scan button label is 'PCF Scan'")
+
+SlashCmdList["PRICECHECKERFOREVER"]("tooltip")
+Assert(PCF_DB.settings.showTooltip == true, "/pcf tooltip toggles showTooltip ON")
 
 -- Start scan via clicking the AH Scan button
 tocAddonTable.Scanner.scanButton:Click()
@@ -172,5 +188,11 @@ _G.GameTooltip:AddLine("Arcanite Bar")
 _G.GameTooltip:AddLine("Sell Price: 10s")
 _G.GameTooltip:SetItem("Arcanite Bar", "|cff1eff00|Hitem:12360:0:0:0|h[Arcanite Bar]|h|r")
 Assert(_G.GameTooltip.lines[#_G.GameTooltip.lines] == "AH Price: 14g50s", "Tooltip displays 'AH Price: 14g50s' below Sell Price when AH price is known")
+
+-- Verify toggling off hides button and suppresses tooltip again
+SlashCmdList["PRICECHECKERFOREVER"]("button")
+Assert(PCF_DB.settings.showScanButton == false and tocAddonTable.Scanner.scanButton.shown == false, "/pcf button hides AH scan button when toggled OFF")
+SlashCmdList["PRICECHECKERFOREVER"]("tooltip")
+Assert(PCF_DB.settings.showTooltip == false, "/pcf tooltip toggles showTooltip OFF")
 
 print("\n--- All Unit Tests Passed Successfully ---")
