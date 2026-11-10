@@ -1,5 +1,9 @@
+package-as: PriceCheckerForever
+
 ignore:
-- Tests
-- .git
-- .github
-- .gitignore
+  - Tests
+  - .antigravity
+  - .git
+  - .github
+  - .gitignore
+  - .pkgmeta
