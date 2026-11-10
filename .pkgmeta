@@ -1,0 +1,5 @@
+ignore:
+- Tests
+- .git
+- .github
+- .gitignore
