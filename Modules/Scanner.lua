@@ -5,9 +5,13 @@ _G.PCF = PCF
 PCF.Scanner = PCF.Scanner or {}
 
 local isScanning = false
+local isBrowseScanning = false
 local waitingForPage = false
 local timerPending = false
 local activeScanToken = 0
+local browseProcessedCount = 0
+local browseEstimatedTotal = 0
+local REPLICATE_COOLDOWN_SECONDS = 900
 
 local scanFrame = CreateFrame("Frame")
 local scanPage = 0
@@ -140,8 +144,8 @@ local function UpdateScanUI(state, messageOverride)
             progressBar:SetMinMaxValues(0, 1)
             progressBar:SetValue(1)
             progressBar:SetStatusBarColor(0.25, 0.25, 0.25, 0.80)
-            local ageMin = math.max(0, math.floor((time() - PCF_DB.lastFullScan) / 60))
-            local ageStr = ageMin >= 60 and string.format("%dh %dm ago", math.floor(ageMin / 60), ageMin % 60) or string.format("%dm ago", ageMin)
+            local ageStr = (PCF.Formatter and PCF.Formatter.FormatRelativeAge and PCF.Formatter.FormatRelativeAge(PCF_DB.lastFullScan))
+                or string.format("%dm ago", math.max(0, math.floor((time() - PCF_DB.lastFullScan) / 60)))
             progressText:SetText(string.format("PCF Ready (%d items, %s)", CountDatabaseItems(), ageStr))
         else
             statusContainer:Show()
@@ -405,6 +409,7 @@ end
 
 local function FinishScan()
     isScanning = false
+    isBrowseScanning = false
     waitingForPage = false
     timerPending = false
     activeScanToken = activeScanToken + 1
@@ -466,11 +471,144 @@ local function ProcessPage()
     end
 end
 
+local function ScheduleBrowseWatchdog(delaySeconds)
+    local myToken = activeScanToken
+    local prevProcessed = browseProcessedCount
+    C_Timer.After(delaySeconds or 6.0, function()
+        if not isScanning or not isBrowseScanning or activeScanToken ~= myToken then
+            return
+        end
+        if browseProcessedCount == prevProcessed then
+            if uniqueItemsScanned > 0 then
+                FinishScan()
+            else
+                PCF.Scanner.StopScan("AH busy — try again in a moment")
+            end
+        end
+    end)
+end
+
+local function StartModernBrowseScan()
+    if not C_AuctionHouse or not C_AuctionHouse.SendBrowseQuery then
+        PCF.Scanner.StopScan("AH scan on cooldown — wait a few minutes")
+        return false
+    end
+
+    isScanning = true
+    isBrowseScanning = true
+    waitingForPage = true
+    timerPending = false
+    activeScanToken = activeScanToken + 1
+    browseProcessedCount = 0
+    browseEstimatedTotal = math.max(500, CountDatabaseItems())
+    scanPage = 0
+    totalPages = 0
+    totalAuctionsCount = browseEstimatedTotal
+    scannedAuctionsCount = 0
+    uniqueItemsScanned = 0
+    scanStartTime = GetTime()
+    seenInScan = {}
+    SafeUnregisterEvent(scanFrame, "REPLICATE_ITEM_LIST_UPDATE")
+    UpdateScanUI("SCANNING", "Querying AH items...")
+
+    local sortOrder = (Enum and Enum.AuctionHouseSortOrder and Enum.AuctionHouseSortOrder.Price) or 0
+    local query = {
+        searchString = "",
+        sorts = {
+            { sortOrder = sortOrder, reverseSort = false },
+        },
+        filters = {},
+    }
+    local ok = pcall(C_AuctionHouse.SendBrowseQuery, query)
+    if not ok then
+        pcall(C_AuctionHouse.SendBrowseQuery, { searchString = "", sorts = {} })
+    end
+
+    ScheduleBrowseWatchdog(6.0)
+    return true
+end
+
+local function ProcessModernBrowseBatch(addedResults)
+    if not isScanning or not isBrowseScanning then
+        return
+    end
+
+    local now = time()
+    local prevProcessed = browseProcessedCount
+    local ok, results = false, nil
+    if C_AuctionHouse and C_AuctionHouse.GetBrowseResults then
+        ok, results = pcall(C_AuctionHouse.GetBrowseResults)
+    end
+
+    if ok and type(results) == "table" and #results > browseProcessedCount then
+        for i = browseProcessedCount + 1, #results do
+            local row = results[i]
+            local itemId = row and row.itemKey and row.itemKey.itemID
+            local minPrice = row and row.minPrice
+            local totalQty = (row and row.totalQuantity and row.totalQuantity > 0) and row.totalQuantity or 1
+            if itemId and itemId > 0 and minPrice and minPrice > 0 then
+                RecordItemAuction(itemId, 1, minPrice, minPrice, now, "Scan", seenInScan, true)
+                if PCF_DB and PCF_DB.prices and PCF_DB.prices[itemId] then
+                    PCF_DB.prices[itemId].count = totalQty
+                end
+            end
+        end
+        browseProcessedCount = #results
+    elseif type(addedResults) == "table" and #addedResults > 0 then
+        for i = 1, #addedResults do
+            local row = addedResults[i]
+            local itemId = row and row.itemKey and row.itemKey.itemID
+            local minPrice = row and row.minPrice
+            local totalQty = (row and row.totalQuantity and row.totalQuantity > 0) and row.totalQuantity or 1
+            if itemId and itemId > 0 and minPrice and minPrice > 0 then
+                RecordItemAuction(itemId, 1, minPrice, minPrice, now, "Scan", seenInScan, true)
+                if PCF_DB and PCF_DB.prices and PCF_DB.prices[itemId] then
+                    PCF_DB.prices[itemId].count = totalQty
+                end
+            end
+        end
+        browseProcessedCount = browseProcessedCount + #addedResults
+    end
+
+    local hasFull = true
+    if C_AuctionHouse and C_AuctionHouse.HasFullBrowseResults then
+        local okFull, fullVal = pcall(C_AuctionHouse.HasFullBrowseResults)
+        if okFull then
+            hasFull = (fullVal == true)
+        end
+    end
+
+    if not hasFull and browseProcessedCount > prevProcessed and C_AuctionHouse and C_AuctionHouse.RequestMoreBrowseResults then
+        browseEstimatedTotal = math.max(browseEstimatedTotal, browseProcessedCount + 500)
+        totalAuctionsCount = browseEstimatedTotal
+        scannedAuctionsCount = browseProcessedCount
+        scanPage = math.max(1, math.ceil(browseProcessedCount / 500))
+        totalPages = math.max(scanPage + 1, math.ceil(browseEstimatedTotal / 500))
+        UpdateScanUI("SCANNING")
+
+        if not timerPending then
+            timerPending = true
+            local myToken = activeScanToken
+            C_Timer.After(0.10, function()
+                timerPending = false
+                if not isScanning or not isBrowseScanning or activeScanToken ~= myToken then
+                    return
+                end
+                pcall(C_AuctionHouse.RequestMoreBrowseResults)
+                ScheduleBrowseWatchdog(5.0)
+            end)
+        end
+    else
+        FinishScan()
+    end
+end
+
 local function ProcessModernReplicate()
     if not isScanning or not waitingForPage then
         return
     end
     waitingForPage = false
+    isBrowseScanning = false
     SafeUnregisterEvent(scanFrame, "REPLICATE_ITEM_LIST_UPDATE")
 
     if not C_AuctionHouse or not C_AuctionHouse.GetNumReplicateItems then
@@ -479,6 +617,13 @@ local function ProcessModernReplicate()
     end
 
     local numItems = C_AuctionHouse.GetNumReplicateItems() or 0
+    if numItems <= 0 and C_AuctionHouse.SendBrowseQuery then
+        StartModernBrowseScan()
+        return
+    end
+
+    PCF_DB = PCF_DB or {}
+    PCF_DB.lastReplicateScan = time()
     totalAuctionsCount = numItems
     local batchSize = 500
     totalPages = math.max(1, math.ceil(numItems / batchSize))
@@ -525,6 +670,7 @@ end
 function PCF.Scanner.StopScan(reason)
     if not isScanning then return end
     isScanning = false
+    isBrowseScanning = false
     waitingForPage = false
     timerPending = false
     activeScanToken = activeScanToken + 1
@@ -546,25 +692,48 @@ function PCF.Scanner.StartScan()
         return
     end
 
-    -- Modern C_AuctionHouse replication path if legacy QueryAuctionItems is unavailable
-    if not QueryAuctionItems and C_AuctionHouse and C_AuctionHouse.ReplicateItems then
-        isScanning = true
-        waitingForPage = true
-        timerPending = false
-        activeScanToken = activeScanToken + 1
-        scanPage = 0
-        totalPages = 0
-        totalAuctionsCount = 0
-        scannedAuctionsCount = 0
-        uniqueItemsScanned = 0
-        scanStartTime = GetTime()
-        seenInScan = {}
-        UpdateScanUI("SCANNING", "Requesting AH data...")
+    -- Modern C_AuctionHouse path if legacy QueryAuctionItems is unavailable
+    if not QueryAuctionItems and C_AuctionHouse then
+        local lastReplicate = math.max(
+            (PCF_DB and PCF_DB.lastReplicateScan) or 0,
+            (PCF_DB and PCF_DB.lastFullScan) or 0
+        )
+        local replicateReady = C_AuctionHouse.ReplicateItems ~= nil
+            and (lastReplicate <= 0 or (time() - lastReplicate) >= REPLICATE_COOLDOWN_SECONDS)
 
-        SafeRegisterEvent(scanFrame, "REPLICATE_ITEM_LIST_UPDATE")
-        C_AuctionHouse.ReplicateItems()
-        print("|cff00ff00[PCF]|r Starting full AH scan...")
-        return
+        if replicateReady then
+            isScanning = true
+            isBrowseScanning = false
+            waitingForPage = true
+            timerPending = false
+            activeScanToken = activeScanToken + 1
+            local myToken = activeScanToken
+            scanPage = 0
+            totalPages = 0
+            totalAuctionsCount = 0
+            scannedAuctionsCount = 0
+            uniqueItemsScanned = 0
+            scanStartTime = GetTime()
+            seenInScan = {}
+            UpdateScanUI("SCANNING", "Requesting AH data...")
+
+            SafeRegisterEvent(scanFrame, "REPLICATE_ITEM_LIST_UPDATE")
+            C_AuctionHouse.ReplicateItems()
+            print("|cff00ff00[PCF]|r Starting full AH scan...")
+
+            -- Fallback: if REPLICATE_ITEM_LIST_UPDATE is throttled by the server,
+            -- automatically switch to browse-all pagination after 3 seconds.
+            C_Timer.After(3.0, function()
+                if isScanning and waitingForPage and not isBrowseScanning and activeScanToken == myToken then
+                    StartModernBrowseScan()
+                end
+            end)
+            return
+        elseif C_AuctionHouse.SendBrowseQuery then
+            print("|cff00ff00[PCF]|r Starting full AH scan...")
+            StartModernBrowseScan()
+            return
+        end
     end
 
     if not CanSendAuctionQuery or not CanSendAuctionQuery() then
@@ -574,6 +743,7 @@ function PCF.Scanner.StartScan()
     end
 
     isScanning = true
+    isBrowseScanning = false
     waitingForPage = true
     timerPending = false
     activeScanToken = activeScanToken + 1
@@ -600,8 +770,9 @@ function PCF.Scanner.Init()
     SafeRegisterEvent(scanFrame, "AUCTION_HOUSE_CLOSED")
     SafeRegisterEvent(scanFrame, "AUCTION_ITEM_LIST_UPDATE")
     SafeRegisterEvent(scanFrame, "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
+    SafeRegisterEvent(scanFrame, "AUCTION_HOUSE_BROWSE_RESULTS_ADDED")
 
-    scanFrame:SetScript("OnEvent", function(_, event)
+    scanFrame:SetScript("OnEvent", function(_, event, arg1)
         if event == "AUCTION_HOUSE_SHOW" then
             CreateAuctionHouseUI()
         elseif event == "AUCTION_HOUSE_CLOSED" then
@@ -614,8 +785,10 @@ function PCF.Scanner.Init()
             else
                 PCF.Scanner.SniffVisiblePage()
             end
-        elseif event == "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED" then
-            if not isScanning then
+        elseif event == "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED" or event == "AUCTION_HOUSE_BROWSE_RESULTS_ADDED" then
+            if isScanning and isBrowseScanning then
+                ProcessModernBrowseBatch(arg1)
+            elseif not isScanning then
                 PCF.Scanner.SniffVisiblePage()
             end
         elseif event == "REPLICATE_ITEM_LIST_UPDATE" then

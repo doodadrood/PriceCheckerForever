@@ -38,3 +38,20 @@ function PCF.Formatter.FormatTooltipMoney(copper)
     if c > 0 or #parts == 0 then table.insert(parts, string.format("%d%s", c, COPPER_ICON)) end
     return table.concat(parts, " ")
 end
+
+function PCF.Formatter.FormatRelativeAge(timestamp, nowOverride)
+    if type(timestamp) ~= "number" then
+        return "0m ago"
+    end
+    local now = nowOverride or time()
+    local ageMin = math.max(0, math.floor((now - timestamp) / 60))
+    if ageMin >= 60 then
+        local hours = math.floor(ageMin / 60)
+        local mins = ageMin % 60
+        if mins > 0 then
+            return string.format("%dh %dm ago", hours, mins)
+        end
+        return string.format("%dh ago", hours)
+    end
+    return string.format("%dm ago", ageMin)
+end

@@ -120,23 +120,26 @@ PCF.Consensus.frame:Trigger("CHAT_MSG_ADDON", "PCF_SYNC", string.format("CLAIM:1
 pendingTimer.callback()
 Assert(#Mock.chatMessages == 2, "Suppress Guild chat response when peer claims hash first")
 
--- Stack quantity multiplier chat response test (?[Briarthorn]x10 and *10)
+-- Stack quantity multiplier chat response test (?[Briarthorn]x10 and *10) & exact minute scan age
 local savedTSM, savedAuc = _G.TSM_API, _G.Auctionator
 _G.TSM_API, _G.Auctionator = nil, nil
+PCF_DB.lastFullScan = math.floor(Mock.currentTime)
 PCF_DB.prices[2450] = { minBuyout = 95, minBid = 90, lastUpdated = math.floor(Mock.currentTime), count = 1, source = "Scan" }
 Mock.currentTime = 1100.0
 PCF.ChatListener.frame:Trigger("CHAT_MSG_WHISPER", "?|cffffffff|Hitem:2450:0:0:0|h[Briarthorn]|h|rx10", "GuildMate")
 Assert(
-    Mock.chatMessages[#Mock.chatMessages].msg == "Price check for |cffffffff|Hitem:2450:0:0:0|h[Briarthorn]|h|r: 9s 50c (95c ea) [Native AH Scan (0h ago)]",
+    Mock.chatMessages[#Mock.chatMessages].msg == "Price check for |cffffffff|Hitem:2450:0:0:0|h[Briarthorn]|h|r: 9s 50c (95c ea) [Native AH Scan (0m ago)]",
     "Format stack and unit price in chat response for ?[item]x10"
 )
-Mock.currentTime = 1110.0
+-- Advance time by 14 minutes (840s) and verify chat reply says (14m ago) matching AH banner
+Mock.currentTime = 1080.0 + (14 * 60)
 PCF.ChatListener.frame:Trigger("CHAT_MSG_WHISPER", "?|cffffffff|Hitem:2450:0:0:0|h[Briarthorn]|h|r*5", "GuildMate")
 Assert(
-    Mock.chatMessages[#Mock.chatMessages].msg == "Price check for |cffffffff|Hitem:2450:0:0:0|h[Briarthorn]|h|r: 4s 75c (95c ea) [Native AH Scan (0h ago)]",
-    "Format stack and unit price in chat response for ?[item]*5"
+    Mock.chatMessages[#Mock.chatMessages].msg == "Price check for |cffffffff|Hitem:2450:0:0:0|h[Briarthorn]|h|r: 4s 75c (95c ea) [Native AH Scan (14m ago)]",
+    "Format stack and unit price with exact minute age (14m ago) for ?[item]*5"
 )
 PCF_DB.prices[2450] = nil
+PCF_DB.lastFullScan = 0
 _G.TSM_API, _G.Auctionator = savedTSM, savedAuc
 
 -- 6. AH Scanner, UI Button, Progress Bar & TOC Loader Integration Test
@@ -205,6 +208,34 @@ tocAddonTable.Scanner.frame:Trigger("AUCTION_ITEM_LIST_UPDATE")
 Assert(tocAddonTable.Scanner.scanButton:GetText() == "PCF Scan", "Button resets to 'PCF Scan' on scan completion")
 Assert(tocAddonTable.Scanner.progressText:GetText():find("100%% Done") ~= nil, "Progress text shows 100% Done on completion")
 Assert(PCF_DB.prices[12360] and PCF_DB.prices[12360].minBuyout == 145000, "Scanner computes unit buyout (290000 / 2 = 145000c)")
+
+-- Modern C_AuctionHouse scan test within 15-minute ReplicateItems cooldown (uses SendBrowseQuery fallback)
+local savedQueryAuctionItems = _G.QueryAuctionItems
+_G.QueryAuctionItems = nil
+local browseQueryCalled = false
+local browseResultsData = {
+    { itemKey = { itemID = 13468 }, minPrice = 42000, totalQuantity = 12 },
+}
+_G.C_AuctionHouse = {
+    ReplicateItems = function() end,
+    SendBrowseQuery = function()
+        browseQueryCalled = true
+    end,
+    GetBrowseResults = function()
+        return browseResultsData
+    end,
+    HasFullBrowseResults = function()
+        return true
+    end,
+}
+Mock.currentTime = Mock.currentTime + 540 -- 9 minutes after previous scan (< 15m ReplicateItems cooldown)
+tocAddonTable.Scanner.scanButton:Click()
+Assert(browseQueryCalled == true, "Use C_AuctionHouse.SendBrowseQuery when ReplicateItems is within 15-minute cooldown")
+tocAddonTable.Scanner.frame:Trigger("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
+Assert(tocAddonTable.Scanner.scanButton:GetText() == "PCF Scan", "Browse-all scan completes cleanly without hanging")
+Assert(PCF_DB.prices[13468] and PCF_DB.prices[13468].minBuyout == 42000, "Browse-all scan records item minPrice accurately")
+_G.C_AuctionHouse = nil
+_G.QueryAuctionItems = savedQueryAuctionItems
 
 -- 7. Tooltip AH Price Display Tests
 _G.TSM_API = nil
