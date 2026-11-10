@@ -5,7 +5,7 @@
 ---
 
 ## Features
-- **Automated Chat Price Checks**: Replies to `?[Item Link]` and `pc [Item Link]` in Guild Chat and Whispers with decentralized peer deduplication (`PCF_SYNC`) so only one guild member responds.
+- **Automated Chat Price Checks**: Replies to `?[Item Link]` and `pc [Item Link]` (including optional stack multipliers such as `?[Item Link]x10` or `?[Item Link]*10`) in Guild Chat and Whispers with decentralized peer deduplication (`PCF_SYNC`) so only one guild member responds.
 - **Multi-Tier Pricing Pipeline**: Evaluates `TradeSkillMaster` -> `Auctionator` -> `Native AH Cache / Mesh / Sniff` -> `Vendor Fallback`.
 - **Non-Blocking AH Scanner & Passive Sniffing**: Includes an on-window `PCF Scan` button with a live progress/ETA bar, plus opportunistic passive page sniffing while browsing the Auction House.
 - **Peer-to-Peer Guild Mesh Sync**: Shares delta-compressed price updates (`<245` bytes per chunk) across guild members with strict anti-chattiness cooldowns.

@@ -29,11 +29,17 @@ local function Assert(condition, testName)
 end
 
 -- 1. Parser Tests
-local link1, id1 = PCF.ItemParser.Parse("?[|cffff8000|Hitem:19019:0:0:0|h[Thunderfury]|h|r]")
-Assert(id1 == 19019, "Parse standard ?[item] link")
+local link1, id1, qty1 = PCF.ItemParser.Parse("?[|cffff8000|Hitem:19019:0:0:0|h[Thunderfury]|h|r]")
+Assert(id1 == 19019 and qty1 == 1, "Parse standard ?[item] link")
 
-local link2, id2 = PCF.ItemParser.Parse("   pc   |cffff8000|Hitem:19019:0:0:0|h[Thunderfury]|h|r")
-Assert(id2 == 19019, "Parse pc[item] with irregular spacing")
+local link2, id2, qty2 = PCF.ItemParser.Parse("   pc   |cffff8000|Hitem:19019:0:0:0|h[Thunderfury]|h|r")
+Assert(id2 == 19019 and qty2 == 1, "Parse pc[item] with irregular spacing")
+
+local linkX, idX, qtyX = PCF.ItemParser.Parse("?|cffffffff|Hitem:2450:0:0:0|h[Briarthorn]|h|rx10")
+Assert(idX == 2450 and qtyX == 10 and linkX == "|cffffffff|Hitem:2450:0:0:0|h[Briarthorn]|h|r", "Parse ?[item]x10 stack multiplier")
+
+local linkStar, idStar, qtyStar = PCF.ItemParser.Parse("? |cffffffff|Hitem:2450:0:0:0|h[Briarthorn]|h|r * 20")
+Assert(idStar == 2450 and qtyStar == 20 and linkStar == "|cffffffff|Hitem:2450:0:0:0|h[Briarthorn]|h|r", "Parse ?[item] * 20 stack multiplier")
 
 local link3, id3 = PCF.ItemParser.Parse("what is the price of this item?")
 Assert(id3 == nil, "Reject input without trigger or item link")
@@ -113,6 +119,25 @@ local expectedBucket = math.floor(Mock.currentTime / 60)
 PCF.Consensus.frame:Trigger("CHAT_MSG_ADDON", "PCF_SYNC", string.format("CLAIM:19019_%d", expectedBucket), "GUILD", "OtherNode")
 pendingTimer.callback()
 Assert(#Mock.chatMessages == 2, "Suppress Guild chat response when peer claims hash first")
+
+-- Stack quantity multiplier chat response test (?[Briarthorn]x10 and *10)
+local savedTSM, savedAuc = _G.TSM_API, _G.Auctionator
+_G.TSM_API, _G.Auctionator = nil, nil
+PCF_DB.prices[2450] = { minBuyout = 95, minBid = 90, lastUpdated = math.floor(Mock.currentTime), count = 1, source = "Scan" }
+Mock.currentTime = 1100.0
+PCF.ChatListener.frame:Trigger("CHAT_MSG_WHISPER", "?|cffffffff|Hitem:2450:0:0:0|h[Briarthorn]|h|rx10", "GuildMate")
+Assert(
+    Mock.chatMessages[#Mock.chatMessages].msg == "Price check for |cffffffff|Hitem:2450:0:0:0|h[Briarthorn]|h|r: 9s 50c (95c ea) [Native AH Scan (0h ago)]",
+    "Format stack and unit price in chat response for ?[item]x10"
+)
+Mock.currentTime = 1110.0
+PCF.ChatListener.frame:Trigger("CHAT_MSG_WHISPER", "?|cffffffff|Hitem:2450:0:0:0|h[Briarthorn]|h|r*5", "GuildMate")
+Assert(
+    Mock.chatMessages[#Mock.chatMessages].msg == "Price check for |cffffffff|Hitem:2450:0:0:0|h[Briarthorn]|h|r: 4s 75c (95c ea) [Native AH Scan (0h ago)]",
+    "Format stack and unit price in chat response for ?[item]*5"
+)
+PCF_DB.prices[2450] = nil
+_G.TSM_API, _G.Auctionator = savedTSM, savedAuc
 
 -- 6. AH Scanner, UI Button, Progress Bar & TOC Loader Integration Test
 _G.AuctionFrame = CreateFrame("Frame", "AuctionFrame")

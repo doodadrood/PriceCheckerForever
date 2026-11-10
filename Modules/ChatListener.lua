@@ -26,15 +26,31 @@ local function CheckCooldown(sender)
     return true
 end
 
-function PCF.ChatListener.DispatchPriceReply(itemLink, itemId, channel, target, cooldownKey)
+function PCF.ChatListener.DispatchPriceReply(itemLink, itemId, channel, target, cooldownKey, quantity)
     if not itemLink or not itemId then return false end
     if not CheckCooldown(cooldownKey or target or channel) then
         return false
     end
 
+    quantity = tonumber(quantity) and math.floor(tonumber(quantity)) or 1
+    if quantity < 1 then
+        quantity = 1
+    end
+
     local price, source = PCF.ProviderRegistry.ResolvePrice(itemLink, itemId)
-    local formatted = price and PCF.Formatter.FormatMoney(price) or "No price data"
-    local responseMsg = string.format("Price check for %s: %s (%s)", itemLink, formatted, source)
+    local formatted
+    if price and price > 0 then
+        if quantity > 1 then
+            local stackFormatted = PCF.Formatter.FormatMoney(price * quantity)
+            local unitFormatted = PCF.Formatter.FormatMoney(price)
+            formatted = string.format("%s (%s ea)", stackFormatted, unitFormatted)
+        else
+            formatted = PCF.Formatter.FormatMoney(price)
+        end
+    else
+        formatted = "No price data"
+    end
+    local responseMsg = string.format("Price check for %s: %s [%s]", itemLink, formatted, source)
 
     local upperChannel = (channel or "GUILD"):upper()
     if upperChannel == "WHISPER" then
@@ -63,10 +79,10 @@ local function HandleIncoming(message, sender, channel)
     if not PCF_DB or not PCF_DB.settings or not PCF_DB.settings.enabled then return end
     if IsSelfSender(sender) then return end
 
-    local itemLink, itemId = PCF.ItemParser.Parse(message)
+    local itemLink, itemId, quantity = PCF.ItemParser.Parse(message)
     if not itemLink or not itemId then return end
 
-    PCF.ChatListener.DispatchPriceReply(itemLink, itemId, channel, sender, sender)
+    PCF.ChatListener.DispatchPriceReply(itemLink, itemId, channel, sender, sender, quantity)
 end
 
 function PCF.ChatListener.ResetCooldowns()

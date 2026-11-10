@@ -6,21 +6,35 @@ _G.GPC = PCF
 local function NormalizeItemInput(itemLinkOrId)
     if type(itemLinkOrId) == "number" then
         if itemLinkOrId > 0 then
-            return nil, math.floor(itemLinkOrId)
+            return nil, math.floor(itemLinkOrId), 1
         end
-        return nil, nil
+        return nil, nil, nil
     elseif type(itemLinkOrId) == "string" then
         local directId = tonumber(itemLinkOrId)
         if directId and directId > 0 then
-            return nil, math.floor(directId)
+            return nil, math.floor(directId), 1
         end
         local extractedId = tonumber(itemLinkOrId:match("item:(%d+)"))
         if extractedId and extractedId > 0 then
-            local link = itemLinkOrId:find("|Hitem:") and itemLinkOrId or nil
-            return link, extractedId
+            local cleanLink = itemLinkOrId:match("(|c%x+|Hitem:%d+.-|h%[.-%]|h|r)")
+                or itemLinkOrId:match("(|cn[^:]+:|Hitem:%d+.-|h%[.-%]|h|r)")
+                or itemLinkOrId:match("(|Hitem:%d+.-|h%[.-%]|h)")
+            local parsedQty = 1
+            if cleanLink then
+                local _, endIdx = itemLinkOrId:find(cleanLink, 1, true)
+                if endIdx then
+                    local tail = itemLinkOrId:sub(endIdx + 1)
+                    local qtyStr = tail:match("^%]?%s*[xX%*]%s*(%d+)")
+                        or tail:match("^%]?%s*(%d+)%s*[xX%*]")
+                    if qtyStr then
+                        parsedQty = math.max(1, math.floor(tonumber(qtyStr) or 1))
+                    end
+                end
+            end
+            return cleanLink, extractedId, parsedQty
         end
     end
-    return nil, nil
+    return nil, nil, nil
 end
 
 local function NormalizeSourceLabel(rawSource)
@@ -88,16 +102,17 @@ function PCF_API.GetPriceTimestamp(itemId)
     return nil
 end
 
-function PCF_API.RequestPriceCheck(itemLink, channel, target)
+function PCF_API.RequestPriceCheck(itemLink, channel, target, quantity)
     if not PCF.ChatListener or not PCF.ChatListener.DispatchPriceReply then
         return false
     end
-    local link, itemId = NormalizeItemInput(itemLink)
+    local link, itemId, parsedQty = NormalizeItemInput(itemLink)
     if not itemId then
         return false
     end
+    local resolvedQty = tonumber(quantity) or parsedQty or 1
     local displayLink = link or (type(itemLink) == "string" and itemLink) or string.format("[item:%d]", itemId)
-    return PCF.ChatListener.DispatchPriceReply(displayLink, itemId, channel or "GUILD", target, target or channel or "_API_")
+    return PCF.ChatListener.DispatchPriceReply(displayLink, itemId, channel or "GUILD", target, target or channel or "_API_", resolvedQty)
 end
 
 function PCF_API.IsReady()
