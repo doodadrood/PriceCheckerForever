@@ -133,7 +133,7 @@ for line in io.lines("PriceCheckerForever.toc") do
 end
 
 tocAddonTable.coreFrame:Trigger("ADDON_LOADED", "PriceCheckerForever")
-Assert(type(SlashCmdList["GUILDPRICECHECK"]) == "function", "Register /gpc slash command on ADDON_LOADED")
+Assert(type(SlashCmdList["PRICECHECKERFOREVER"]) == "function" and SLASH_PRICECHECKERFOREVER1 == "/pcf", "Register /pcf slash command on ADDON_LOADED")
 
 -- Simulate opening Auction House window
 tocAddonTable.Scanner.frame:Trigger("AUCTION_HOUSE_SHOW")

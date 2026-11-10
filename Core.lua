@@ -16,9 +16,8 @@ coreFrame:SetScript("OnEvent", function(self, event, loadedAddon)
     end
 
     -- Slash Command Setup
-    SLASH_GUILDPRICECHECK1 = "/gpc"
-    SLASH_GUILDPRICECHECK2 = "/pcf"
-    SlashCmdList["GUILDPRICECHECK"] = function(msg)
+    SLASH_PRICECHECKERFOREVER1 = "/pcf"
+    SlashCmdList["PRICECHECKERFOREVER"] = function(msg)
         local cmd = (msg or ""):lower():match("^%s*(%S+)")
         if cmd == "scan" then
             PCF.Scanner.StartScan()
@@ -27,12 +26,12 @@ coreFrame:SetScript("OnEvent", function(self, event, loadedAddon)
             print(string.format("|cff00ff00[PCF]|r Enabled state: %s", tostring(PCF_DB.settings.enabled)))
         else
             print("|cff00ff00PriceCheckerForever Commands:|r")
-            print("  /gpc scan   - Perform full AH scan (must have AH window open)")
-            print("  /gpc toggle - Enable or disable automatic replies")
+            print("  /pcf scan   - Perform full AH scan (must have AH window open)")
+            print("  /pcf toggle - Enable or disable automatic replies")
         end
     end
 
-    print("|cff00ff00PriceCheckerForever loaded.|r Use /gpc for options.")
+    print("|cff00ff00PriceCheckerForever loaded.|r Use /pcf for options.")
 end)
 
 PCF.coreFrame = coreFrame
