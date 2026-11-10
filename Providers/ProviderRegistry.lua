@@ -44,7 +44,7 @@ local function GetVendorPrice(itemLink, itemId)
     return nil
 end
 
-function PCF.ProviderRegistry.ResolvePrice(itemLink, itemId)
+function PCF.ProviderRegistry.ResolveAHPrice(itemLink, itemId)
     local preferred = PCF_DB and PCF_DB.settings and PCF_DB.settings.preferredProvider
     local preferredName = preferred and PREFERRED_MAP[preferred:upper()]
 
@@ -64,6 +64,15 @@ function PCF.ProviderRegistry.ResolvePrice(itemLink, itemId)
         if price and price > 0 then
             return price, source
         end
+    end
+
+    return nil, nil
+end
+
+function PCF.ProviderRegistry.ResolvePrice(itemLink, itemId)
+    local ahPrice, ahSource = PCF.ProviderRegistry.ResolveAHPrice(itemLink, itemId)
+    if ahPrice and ahPrice > 0 then
+        return ahPrice, ahSource
     end
 
     -- Fallback: Vendor Sell Price (Priority 40)

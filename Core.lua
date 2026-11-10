@@ -11,6 +11,9 @@ coreFrame:SetScript("OnEvent", function(self, event, loadedAddon)
     PCF.LoadConfig()
     PCF.Consensus.Init()
     PCF.ChatListener.Init()
+    if PCF.Tooltip and PCF.Tooltip.Init then
+        PCF.Tooltip.Init()
+    end
 
     -- Slash Command Setup
     SLASH_GUILDPRICECHECK1 = "/gpc"
