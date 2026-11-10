@@ -1,13 +1,13 @@
 local _, PCF = ...
-PCF = type(PCF) == "table" and PCF or _G.PCF or {}
+PCF = (_G.PCF_INITIALIZED and _G.PCF) or (type(PCF) == "table" and PCF) or _G.PCF or {}
 _G.PCF = PCF
 
-PCF.Scanner = {}
+PCF.Scanner = PCF.Scanner or {}
 
 local isScanning = false
 local waitingForPage = false
 local timerPending = false
-local usingModernReplicate = false
+local activeScanToken = 0
 
 local scanFrame = CreateFrame("Frame")
 local scanPage = 0
@@ -26,6 +26,18 @@ local scanButton = nil
 local statusContainer = nil
 local progressBar = nil
 local progressText = nil
+
+local function SafeRegisterEvent(frame, eventName)
+    if frame and frame.RegisterEvent then
+        pcall(frame.RegisterEvent, frame, eventName)
+    end
+end
+
+local function SafeUnregisterEvent(frame, eventName)
+    if frame and frame.UnregisterEvent then
+        pcall(frame.UnregisterEvent, frame, eventName)
+    end
+end
 
 local function FormatDuration(seconds)
     seconds = math.max(0, math.ceil(seconds or 0))
@@ -59,10 +71,7 @@ local function IsPassiveSniffingEnabled()
 end
 
 local function SafeUnregisterScanEvents()
-    if usingModernReplicate then
-        pcall(scanFrame.UnregisterEvent, scanFrame, "REPLICATE_ITEM_LIST_UPDATE")
-        usingModernReplicate = false
-    end
+    SafeUnregisterEvent(scanFrame, "REPLICATE_ITEM_LIST_UPDATE")
 end
 
 local function UpdateScanUI(state, messageOverride)
@@ -285,7 +294,7 @@ local function CreateAuctionHouseUI()
 end
 
 local function RecordItemAuction(itemId, count, minBid, buyoutPrice, now, sourceTag, batchMap, currentBatchId)
-    if not itemId or not buyoutPrice or buyoutPrice <= 0 or not count or count <= 0 then
+    if not itemId or itemId <= 0 or not buyoutPrice or buyoutPrice <= 0 or not count or count <= 0 then
         return
     end
 
@@ -342,28 +351,51 @@ function PCF.Scanner.SniffVisiblePage()
     if isScanning or not IsPassiveSniffingEnabled() then
         return 0
     end
-    if not GetNumAuctionItems or not GetAuctionItemInfo then
-        return 0
-    end
 
-    local numBatchAuctions = GetNumAuctionItems("list") or 0
-    if numBatchAuctions <= 0 then
-        return 0
-    end
-
-    local limit = math.min(numBatchAuctions, 50)
     local now = time()
     sniffBatchId = sniffBatchId + 1
     local currentBatchId = sniffBatchId
     local sniffedItems = 0
 
-    for i = 1, limit do
-        local _, _, count, _, _, _, _, minBid, _, buyoutPrice, _, _, _, _, _, _, itemId = GetAuctionItemInfo("list", i)
-        if itemId and buyoutPrice and buyoutPrice > 0 and count and count > 0 then
-            local wasSeen = (seenInSniff[itemId] == currentBatchId)
-            RecordItemAuction(itemId, count, minBid, buyoutPrice, now, "PCF Sniff", seenInSniff, currentBatchId)
-            if not wasSeen and seenInSniff[itemId] == currentBatchId then
-                sniffedItems = sniffedItems + 1
+    -- 1. Legacy AH list sniffing (GetNumAuctionItems / GetAuctionItemInfo)
+    if GetNumAuctionItems and GetAuctionItemInfo then
+        local numBatchAuctions = GetNumAuctionItems("list") or 0
+        if numBatchAuctions > 0 then
+            local limit = math.min(numBatchAuctions, 50)
+            for i = 1, limit do
+                local _, _, count, _, _, _, _, minBid, _, buyoutPrice, _, _, _, _, _, _, itemId = GetAuctionItemInfo("list", i)
+                if itemId and buyoutPrice and buyoutPrice > 0 and count and count > 0 then
+                    local wasSeen = (seenInSniff[itemId] == currentBatchId)
+                    RecordItemAuction(itemId, count, minBid, buyoutPrice, now, "PCF Sniff", seenInSniff, currentBatchId)
+                    if not wasSeen and seenInSniff[itemId] == currentBatchId then
+                        sniffedItems = sniffedItems + 1
+                    end
+                end
+            end
+            return sniffedItems
+        end
+    end
+
+    -- 2. Modern C_AuctionHouse browse results sniffing (if available)
+    if C_AuctionHouse and C_AuctionHouse.GetBrowseResults then
+        local ok, results = pcall(C_AuctionHouse.GetBrowseResults)
+        if ok and type(results) == "table" then
+            local limit = math.min(#results, 50)
+            for i = 1, limit do
+                local row = results[i]
+                local itemId = row and row.itemKey and row.itemKey.itemID
+                local minPrice = row and row.minPrice
+                local totalQty = (row and row.totalQuantity and row.totalQuantity > 0) and row.totalQuantity or 1
+                if itemId and minPrice and minPrice > 0 then
+                    local wasSeen = (seenInSniff[itemId] == currentBatchId)
+                    RecordItemAuction(itemId, 1, minPrice, minPrice, now, "PCF Sniff", seenInSniff, currentBatchId)
+                    if PCF_DB and PCF_DB.prices and PCF_DB.prices[itemId] then
+                        PCF_DB.prices[itemId].count = totalQty
+                    end
+                    if not wasSeen and seenInSniff[itemId] == currentBatchId then
+                        sniffedItems = sniffedItems + 1
+                    end
+                end
             end
         end
     end
@@ -375,6 +407,7 @@ local function FinishScan()
     isScanning = false
     waitingForPage = false
     timerPending = false
+    activeScanToken = activeScanToken + 1
     SafeUnregisterScanEvents()
     PCF_DB = PCF_DB or {}
     PCF_DB.lastFullScan = time()
@@ -385,9 +418,10 @@ end
 local function ScheduleNextLegacyPage(delay)
     if timerPending or not isScanning then return end
     timerPending = true
+    local myToken = activeScanToken
     C_Timer.After(delay or 0.15, function()
         timerPending = false
-        if not isScanning then return end
+        if not isScanning or activeScanToken ~= myToken then return end
         if totalPages > 0 and scanPage >= totalPages then
             FinishScan()
             return
@@ -437,6 +471,7 @@ local function ProcessModernReplicate()
         return
     end
     waitingForPage = false
+    SafeUnregisterEvent(scanFrame, "REPLICATE_ITEM_LIST_UPDATE")
 
     if not C_AuctionHouse or not C_AuctionHouse.GetNumReplicateItems then
         FinishScan()
@@ -451,9 +486,10 @@ local function ProcessModernReplicate()
 
     local now = time()
     local index = 0
+    local myToken = activeScanToken
 
     local function ProcessBatch()
-        if not isScanning then return end
+        if not isScanning or activeScanToken ~= myToken then return end
         local limit = math.min(index + batchSize - 1, numItems - 1)
         for i = index, limit do
             local _, _, count, _, _, _, _, minBid, _, buyoutPrice, _, _, _, _, _, _, itemId = C_AuctionHouse.GetReplicateItemInfo(i)
@@ -491,6 +527,7 @@ function PCF.Scanner.StopScan(reason)
     isScanning = false
     waitingForPage = false
     timerPending = false
+    activeScanToken = activeScanToken + 1
     SafeUnregisterScanEvents()
     UpdateScanUI("ABORTED", reason or "Scan Aborted")
     print("|cffff0000[PCF]|r " .. (reason or "Scan aborted."))
@@ -514,7 +551,7 @@ function PCF.Scanner.StartScan()
         isScanning = true
         waitingForPage = true
         timerPending = false
-        usingModernReplicate = true
+        activeScanToken = activeScanToken + 1
         scanPage = 0
         totalPages = 0
         totalAuctionsCount = 0
@@ -524,7 +561,7 @@ function PCF.Scanner.StartScan()
         seenInScan = {}
         UpdateScanUI("SCANNING", "Requesting AH data...")
 
-        pcall(scanFrame.RegisterEvent, scanFrame, "REPLICATE_ITEM_LIST_UPDATE")
+        SafeRegisterEvent(scanFrame, "REPLICATE_ITEM_LIST_UPDATE")
         C_AuctionHouse.ReplicateItems()
         print("|cff00ff00[PCF]|r Starting full AH scan...")
         return
@@ -539,7 +576,7 @@ function PCF.Scanner.StartScan()
     isScanning = true
     waitingForPage = true
     timerPending = false
-    usingModernReplicate = false
+    activeScanToken = activeScanToken + 1
     scanPage = 0
     totalPages = 0
     totalAuctionsCount = 0
@@ -549,7 +586,7 @@ function PCF.Scanner.StartScan()
     seenInScan = {}
     UpdateScanUI("SCANNING", "Starting scan (Page 1)...")
 
-    scanFrame:RegisterEvent("AUCTION_ITEM_LIST_UPDATE")
+    SafeRegisterEvent(scanFrame, "AUCTION_ITEM_LIST_UPDATE")
     QueryAuctionItems("", nil, nil, 0, 0, 0, 0, false, -1, false)
     print("|cff00ff00[PCF]|r Starting full AH scan...")
 end
@@ -559,9 +596,11 @@ function PCF.Scanner.Init()
     if PCF.Scanner._initialized then return end
     PCF.Scanner._initialized = true
 
-    scanFrame:RegisterEvent("AUCTION_HOUSE_SHOW")
-    scanFrame:RegisterEvent("AUCTION_HOUSE_CLOSED")
-    scanFrame:RegisterEvent("AUCTION_ITEM_LIST_UPDATE")
+    SafeRegisterEvent(scanFrame, "AUCTION_HOUSE_SHOW")
+    SafeRegisterEvent(scanFrame, "AUCTION_HOUSE_CLOSED")
+    SafeRegisterEvent(scanFrame, "AUCTION_ITEM_LIST_UPDATE")
+    SafeRegisterEvent(scanFrame, "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
+
     scanFrame:SetScript("OnEvent", function(_, event)
         if event == "AUCTION_HOUSE_SHOW" then
             CreateAuctionHouseUI()
@@ -573,6 +612,10 @@ function PCF.Scanner.Init()
             if isScanning then
                 ProcessPage()
             else
+                PCF.Scanner.SniffVisiblePage()
+            end
+        elseif event == "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED" then
+            if not isScanning then
                 PCF.Scanner.SniffVisiblePage()
             end
         elseif event == "REPLICATE_ITEM_LIST_UPDATE" then

@@ -80,8 +80,10 @@ _G.CreateFrame = function(frameType, name, parent, template)
             self.scripts["OnClick"](self)
         end
     end
-    function frame:SetOwner(...) end
+    function frame:SetOwner(owner) self.owner = owner end
+    function frame:GetOwner() return self.owner end
     function frame:ClearLines()
+        self._pcfStackCount = nil
         if self.name then
             for i = 1, #self.lines do
                 _G[self.name .. "TextLeft" .. i] = nil
@@ -100,9 +102,10 @@ _G.CreateFrame = function(frameType, name, parent, template)
         end
     end
     function frame:NumLines() return #self.lines end
-    function frame:SetItem(itemName, itemLink)
+    function frame:SetItem(itemName, itemLink, stackCount)
         self.itemName = itemName
         self.itemLink = itemLink
+        self._pcfStackCount = stackCount
         if self.scripts["OnTooltipSetItem"] then
             self.scripts["OnTooltipSetItem"](self)
         end

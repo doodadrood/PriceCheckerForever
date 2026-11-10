@@ -197,6 +197,18 @@ _G.GameTooltip:AddLine("Sell Price: 10s")
 _G.GameTooltip:SetItem("Arcanite Bar", "|cff1eff00|Hitem:12360:0:0:0|h[Arcanite Bar]|h|r")
 Assert(_G.GameTooltip.lines[#_G.GameTooltip.lines] == "AH  Price: 14|TInterface\\MoneyFrame\\UI-GoldIcon:0:0:2:0|t 50|TInterface\\MoneyFrame\\UI-SilverIcon:0:0:2:0|t", "Tooltip displays aligned 'AH  Price:' with coin icons when AH price is known")
 
+-- Stack tooltip test: stack of 5 items at 10c each -> "AH  Price: 50c (10c)" with coin icons
+PCF_DB.prices[99901] = { minBuyout = 10, minBid = 10, lastUpdated = math.floor(Mock.currentTime), count = 5, source = "Scan" }
+_G.GameTooltip:ClearLines()
+_G.GameTooltip:AddLine("Peacebloom")
+_G.GameTooltip:AddLine("Sell Price: 15c")
+_G.GameTooltip:SetItem("Peacebloom", "|cffffffff|Hitem:99901:0:0:0|h[Peacebloom]|h|r", 5)
+Assert(
+    _G.GameTooltip.lines[#_G.GameTooltip.lines] == "AH  Price: 50|TInterface\\MoneyFrame\\UI-CopperIcon:0:0:2:0|t (10|TInterface\\MoneyFrame\\UI-CopperIcon:0:0:2:0|t)",
+    "Tooltip displays stack price followed by unit price in parentheses for stacks > 1"
+)
+PCF_DB.prices[99901] = nil
+
 -- Verify toggling off hides button and suppresses tooltip again
 SlashCmdList["PRICECHECKERFOREVER"]("button")
 Assert(PCF_DB.settings.showScanButton == false and tocAddonTable.Scanner.scanButton.shown == false, "/pcf button hides AH scan button when toggled OFF")

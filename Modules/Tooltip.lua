@@ -1,8 +1,8 @@
 local _, PCF = ...
-PCF = type(PCF) == "table" and PCF or _G.PCF or {}
+PCF = (_G.PCF_INITIALIZED and _G.PCF) or (type(PCF) == "table" and PCF) or _G.PCF or {}
 _G.PCF = PCF
 
-PCF.Tooltip = {}
+PCF.Tooltip = PCF.Tooltip or {}
 
 local function ExtractItemFromTooltip(tooltip, tooltipData)
     local itemLink = nil
@@ -26,6 +26,74 @@ local function ExtractItemFromTooltip(tooltip, tooltipData)
     end
 
     return itemLink, itemId
+end
+
+local function QueryContainerStackCount(bag, slot, expectedItemId)
+    if type(bag) ~= "number" or type(slot) ~= "number" then
+        return nil
+    end
+
+    if _G.C_Container and _G.C_Container.GetContainerItemInfo then
+        local ok, info = pcall(_G.C_Container.GetContainerItemInfo, bag, slot)
+        if ok and type(info) == "table" and info.stackCount and info.stackCount > 1 then
+            if not expectedItemId or not info.itemID or info.itemID == expectedItemId then
+                return math.floor(info.stackCount)
+            end
+        end
+    end
+
+    if _G.GetContainerItemInfo then
+        local ok, _, itemCount, _, _, _, _, link = pcall(_G.GetContainerItemInfo, bag, slot)
+        if ok and type(itemCount) == "number" and itemCount > 1 then
+            local slotItemId = type(link) == "string" and tonumber(link:match("item:(%d+)")) or nil
+            if not expectedItemId or not slotItemId or slotItemId == expectedItemId then
+                return math.floor(itemCount)
+            end
+        end
+    end
+
+    return nil
+end
+
+local function ExtractStackCount(tooltip, itemId)
+    if not tooltip then return 1 end
+
+    if type(tooltip._pcfStackCount) == "number" and tooltip._pcfStackCount > 1 then
+        return math.floor(tooltip._pcfStackCount)
+    end
+
+    local owner = tooltip.GetOwner and tooltip:GetOwner()
+    if owner then
+        if type(owner.count) == "number" and owner.count > 1 then
+            return math.floor(owner.count)
+        end
+        if type(owner.stackCount) == "number" and owner.stackCount > 1 then
+            return math.floor(owner.stackCount)
+        end
+
+        local countRegion = owner.Count or (owner.GetName and owner:GetName() and _G[owner:GetName() .. "Count"])
+        if countRegion and countRegion.GetText and (not countRegion.IsShown or countRegion:IsShown()) then
+            local text = countRegion:GetText()
+            local parsed = type(text) == "string" and tonumber(text:match("^%s*(%d+)%s*$"))
+            if parsed and parsed > 1 then
+                return math.floor(parsed)
+            end
+        end
+
+        local bag = (owner.GetBagID and owner:GetBagID())
+            or owner.bagID
+            or (owner.GetParent and owner:GetParent() and owner:GetParent().GetID and owner:GetParent():GetID())
+        local slot = (owner.GetSlotIndex and owner:GetSlotIndex())
+            or owner.slotID
+            or (owner.GetID and owner:GetID())
+
+        local containerCount = QueryContainerStackCount(bag, slot, itemId)
+        if containerCount and containerCount > 1 then
+            return containerCount
+        end
+    end
+
+    return 1
 end
 
 local function UpdateOrAddAHPriceLine(tooltip, lineText)
@@ -69,10 +137,19 @@ function PCF.Tooltip.OnTooltipSetItem(tooltip, tooltipData)
         return
     end
 
-    local formatted = PCF.Formatter.FormatTooltipMoney(ahPrice)
-    -- Two spaces between "AH" and "Price:" shifts "Price:" right by 3px,
-    -- aligning "Price:" and ":" with "Sell Price:" in Friz Quadrata TT.
-    local lineText = string.format("AH  Price: %s", formatted)
+    local lineText
+    if ahPrice and ahPrice > 0 then
+        local stackCount = ExtractStackCount(tooltip, itemId)
+        local unitFormatted = PCF.Formatter.FormatTooltipMoney(ahPrice)
+        if stackCount and stackCount > 1 then
+            local stackFormatted = PCF.Formatter.FormatTooltipMoney(ahPrice * stackCount)
+            lineText = string.format("AH  Price: %s (%s)", stackFormatted, unitFormatted)
+        else
+            lineText = string.format("AH  Price: %s", unitFormatted)
+        end
+    else
+        lineText = "AH  Price: ??"
+    end
 
     UpdateOrAddAHPriceLine(tooltip, lineText)
 end
@@ -88,6 +165,22 @@ local function HookTooltip(tooltip)
         if ok then
             tooltip._pcfHooked = true
         end
+        pcall(function()
+            tooltip:HookScript("OnTooltipCleared", function(self)
+                self._pcfStackCount = nil
+            end)
+        end)
+        pcall(function()
+            tooltip:HookScript("OnHide", function(self)
+                self._pcfStackCount = nil
+            end)
+        end)
+    end
+
+    if _G.hooksecurefunc and type(tooltip.SetBagItem) == "function" then
+        pcall(_G.hooksecurefunc, tooltip, "SetBagItem", function(self, bag, slot)
+            self._pcfStackCount = QueryContainerStackCount(bag, slot, nil)
+        end)
     end
 end
 
