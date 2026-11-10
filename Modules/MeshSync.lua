@@ -18,6 +18,7 @@ local MAX_ITEMS_PER_CHUNK = 15
 local DIGEST_COOLDOWN_SEC = 1800 -- 30 minutes minimum between REQ_DIGEST broadcasts
 local HEARTBEAT_INTERVAL_SEC = 600 -- 10 minutes between dirty-item gossip broadcasts
 local SEND_PACE_SEC = 0.20 -- 5 messages/sec max outbound drain rate
+local MAX_EXTERNAL_REFRESH_BATCH = 200
 
 local lastDigestRequestTime = -DIGEST_COOLDOWN_SEC
 local pendingDigestReplyId = 0
@@ -28,6 +29,7 @@ local queueHead = 1
 local queueTail = 0
 local queueDrainPending = false
 local heartbeatPending = false
+local recurringDigestScheduled = false
 
 local function RegisterPrefix(prefix)
     if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
@@ -94,6 +96,38 @@ local function EnqueueOutboundMessages(chunks, immediateFirst)
         queueDrainPending = true
         C_Timer.After(SEND_PACE_SEC, DrainOutboundQueue)
     end
+end
+
+-- Queries installed local TSM / Auctionator databases for known items in PCF_DB.prices
+-- so TSM/Auctionator users keep their local cache and guild mesh continuously fresh.
+function PCF.MeshSync.RefreshExternalAddonPrices()
+    if not PCF_DB or not PCF_DB.prices then return 0 end
+    if PCF_DB.settings and PCF_DB.settings.enableSniffExternalAddons == false then
+        return 0
+    end
+    if not PCF.HasExternalAuctionAddon or not PCF.HasExternalAuctionAddon() then
+        return 0
+    end
+    if not PCF.ProviderRegistry or not PCF.ProviderRegistry.ResolveAHPrice then
+        return 0
+    end
+
+    local checked = 0
+    local updated = 0
+    for itemId, data in pairs(PCF_DB.prices) do
+        if type(itemId) == "number" and itemId > 0 then
+            local prevBuyout = data and data.minBuyout
+            local price = PCF.ProviderRegistry.ResolveAHPrice(nil, itemId)
+            if price and price > 0 and price ~= prevBuyout then
+                updated = updated + 1
+            end
+            checked = checked + 1
+            if checked >= MAX_EXTERNAL_REFRESH_BATCH then
+                break
+            end
+        end
+    end
+    return updated
 end
 
 -- Packs price records into compact "DELTA:<itemId>:<buyout>:<timestamp>|..." chunks
@@ -229,6 +263,8 @@ end
 
 local function FlushDirtyHeartbeat()
     heartbeatPending = false
+    PCF.MeshSync.RefreshExternalAddonPrices()
+
     if dirtyCount == 0 then return end
     if not PCF_DB or not PCF_DB.settings or PCF_DB.settings.enablePeerSync == false then
         dirtyItems = {}
@@ -250,7 +286,7 @@ function PCF.MeshSync.MarkDirty(itemId)
         dirtyItems[itemId] = true
         dirtyCount = dirtyCount + 1
     end
-    if not heartbeatPending then
+    if PCF.MeshSync.frame and not heartbeatPending then
         heartbeatPending = true
         local jitteredInterval = HEARTBEAT_INTERVAL_SEC + math.random(0, 300)
         C_Timer.After(jitteredInterval, FlushDirtyHeartbeat)
@@ -313,6 +349,7 @@ local function HandleSyncMessage(prefix, message, channel, sender)
             if pendingDigestReplyId ~= myReplyId then
                 return -- Another peer already responded with a DELTA
             end
+            PCF.MeshSync.RefreshExternalAddonPrices()
             local chunks = PCF.MeshSync.BuildDeltaChunks(sinceTs)
             if #chunks > 0 then
                 dirtyItems = {}
@@ -330,6 +367,14 @@ local function HandleSyncMessage(prefix, message, channel, sender)
     end
 end
 
+local function ScheduleRecurringDigestCycle()
+    local interval = DIGEST_COOLDOWN_SEC + math.random(5, 60)
+    C_Timer.After(interval, function()
+        PCF.MeshSync.RequestDigest(false)
+        ScheduleRecurringDigestCycle()
+    end)
+end
+
 function PCF.MeshSync.Init()
     RegisterPrefix(SYNC_PREFIX)
     RegisterPrefix(LEGACY_SYNC_PREFIX)
@@ -344,9 +389,13 @@ function PCF.MeshSync.Init()
     end)
     PCF.MeshSync.frame = frame
 
-    -- Jittered initial digest request (30-90 seconds after init)
-    local loginDelay = math.random(30, 90)
-    C_Timer.After(loginDelay, function()
-        PCF.MeshSync.RequestDigest(false)
-    end)
+    -- Jittered initial digest request (30-90 seconds after init) + recurring 30m cycle
+    if not recurringDigestScheduled then
+        recurringDigestScheduled = true
+        local loginDelay = math.random(30, 90)
+        C_Timer.After(loginDelay, function()
+            PCF.MeshSync.RequestDigest(false)
+            ScheduleRecurringDigestCycle()
+        end)
+    end
 end

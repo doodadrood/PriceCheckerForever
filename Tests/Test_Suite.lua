@@ -184,6 +184,7 @@ Assert(PCF_DB.prices[12360] and PCF_DB.prices[12360].minBuyout == 145000, "Scann
 -- 7. Tooltip AH Price Display Tests
 _G.TSM_API = nil
 _G.Auctionator = nil
+PCF_DB.prices[2589] = nil
 _G.GameTooltip:ClearLines()
 _G.GameTooltip:AddLine("Linen Cloth")
 _G.GameTooltip:AddLine("Sell Price: 3s3c")
@@ -270,5 +271,27 @@ Assert(sent2 == false and #Mock.addonMessages == msgCountBefore + 1, "Suppress d
 Mock.currentTime = Mock.currentTime + 1300 -- Now > 30 minutes (1900s total) elapsed
 local sent3 = tocAddonTable.MeshSync.RequestDigest(false)
 Assert(sent3 == true and #Mock.addonMessages == msgCountBefore + 2, "Allow REQ_DIGEST after 30-minute cooldown expires")
+
+-- 11. Local TSM / Auctionator -> Mesh Bridge & Background Refresh Tests
+_G.TSM_API = {
+    GetCustomPriceValue = function(priceSource, itemStr)
+        if itemStr == "i:30001" then
+            return 155000
+        elseif itemStr == "i:45000" or (type(itemStr) == "string" and itemStr:find("item:45000")) then
+            return 225000
+        end
+        return nil
+    end
+}
+PCF_DB.settings.showTooltip = false
+_G.GameTooltip:ClearLines()
+_G.GameTooltip:AddLine("Edgemaster's Handguards")
+_G.GameTooltip:SetItem("Edgemaster's Handguards", "|cffa335ee|Hitem:45000:0:0:0|h[Edgemaster's Handguards]|h|r")
+Assert(#_G.GameTooltip.lines == 1, "Do not add PCF tooltip line when TSM is active and showTooltip is off")
+Assert(PCF_DB.prices[45000] and PCF_DB.prices[45000].minBuyout == 225000 and PCF_DB.prices[45000].source == "PCF Sniff", "Silently harvest TSM price into PCF_DB.prices on item hover for guild mesh sharing")
+
+local refreshedCount = tocAddonTable.MeshSync.RefreshExternalAddonPrices()
+Assert(refreshedCount >= 1 and PCF_DB.prices[30001].minBuyout == 155000, "RefreshExternalAddonPrices updates cached items with latest TSM market values")
+_G.TSM_API = nil
 
 print("\n--- All Unit Tests Passed Successfully ---")

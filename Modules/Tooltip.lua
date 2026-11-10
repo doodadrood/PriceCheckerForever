@@ -58,13 +58,17 @@ end
 
 function PCF.Tooltip.OnTooltipSetItem(tooltip, tooltipData)
     if not tooltip then return end
-    if PCF_DB and PCF_DB.settings and PCF_DB.settings.showTooltip == false then
-        return
-    end
     local itemLink, itemId = ExtractItemFromTooltip(tooltip, tooltipData)
     if not itemLink and not itemId then return end
 
+    -- Always resolve AH price first so TSM/Auctionator users passively harvest
+    -- hovered item prices into PCF_DB.prices for the guild mesh even when showTooltip is off
     local ahPrice = PCF.ProviderRegistry.ResolveAHPrice(itemLink, itemId)
+
+    if PCF_DB and PCF_DB.settings and PCF_DB.settings.showTooltip == false then
+        return
+    end
+
     local formatted = PCF.Formatter.FormatTooltipMoney(ahPrice)
     -- Two spaces between "AH" and "Price:" shifts "Price:" right by 3px,
     -- aligning "Price:" and ":" with "Sell Price:" in Friz Quadrata TT.

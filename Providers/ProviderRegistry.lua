@@ -13,6 +13,11 @@ local PREFERRED_MAP = {
     NATIVE = "Native",
 }
 
+local EXTERNAL_PROVIDER_NAMES = {
+    TradeSkillMaster = true,
+    Auctionator = true,
+}
+
 function PCF.ProviderRegistry.Register(name, priority, queryFunc)
     for i = #providers, 1, -1 do
         if providers[i].name == name then
@@ -21,6 +26,43 @@ function PCF.ProviderRegistry.Register(name, priority, queryFunc)
     end
     table.insert(providers, { name = name, priority = priority, query = queryFunc })
     table.sort(providers, function(a, b) return a.priority < b.priority end)
+end
+
+local function CacheExternalProviderPrice(providerName, itemId, price)
+    if not EXTERNAL_PROVIDER_NAMES[providerName] or not itemId or not price or price <= 0 then
+        return
+    end
+    if not PCF_DB or not PCF_DB.prices then
+        return
+    end
+    if PCF_DB.settings and PCF_DB.settings.enableSniffExternalAddons == false then
+        return
+    end
+
+    local now = time()
+    local flooredPrice = math.floor(price)
+    local existing = PCF_DB.prices[itemId]
+
+    if not existing or existing.minBuyout ~= flooredPrice or (now - (existing.lastUpdated or 0)) >= 3600 then
+        if existing then
+            existing.minBuyout = flooredPrice
+            existing.minBid = flooredPrice
+            existing.lastUpdated = now
+            existing.source = "PCF Sniff"
+        else
+            PCF_DB.prices[itemId] = {
+                minBuyout = flooredPrice,
+                minBid = flooredPrice,
+                lastUpdated = now,
+                count = 1,
+                source = "PCF Sniff",
+            }
+        end
+
+        if PCF.MeshSync and PCF.MeshSync.MarkDirty then
+            PCF.MeshSync.MarkDirty(itemId)
+        end
+    end
 end
 
 local function GetVendorPrice(itemLink, itemId)
@@ -53,6 +95,7 @@ function PCF.ProviderRegistry.ResolveAHPrice(itemLink, itemId)
             if provider.name == preferredName then
                 local price, source = provider.query(itemLink, itemId)
                 if price and price > 0 then
+                    CacheExternalProviderPrice(provider.name, itemId, price)
                     return price, source
                 end
             end
@@ -62,6 +105,7 @@ function PCF.ProviderRegistry.ResolveAHPrice(itemLink, itemId)
     for _, provider in ipairs(providers) do
         local price, source = provider.query(itemLink, itemId)
         if price and price > 0 then
+            CacheExternalProviderPrice(provider.name, itemId, price)
             return price, source
         end
     end
