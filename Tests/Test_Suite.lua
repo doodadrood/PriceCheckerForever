@@ -166,7 +166,13 @@ tocAddonTable.Scanner.frame:Trigger("AUCTION_ITEM_LIST_UPDATE")
 Assert(tocAddonTable.Scanner.progressBar:GetValue() == 1, "Progress bar updates to page 1 of 2")
 Assert(tocAddonTable.Scanner.progressText:GetText():find("50%%") ~= nil, "Progress text displays 50% and ETA")
 
--- Simulate Page 2 of 2 arriving
+-- Simulate duplicate AUCTION_ITEM_LIST_UPDATE events for the same page (item cache updates)
+tocAddonTable.Scanner.frame:Trigger("AUCTION_ITEM_LIST_UPDATE")
+tocAddonTable.Scanner.frame:Trigger("AUCTION_ITEM_LIST_UPDATE")
+Assert(tocAddonTable.Scanner.progressBar:GetValue() == 1, "Ignore duplicate AUCTION_ITEM_LIST_UPDATE events before next page query")
+
+-- Fire the scheduled next-page timer to request Page 2 of 2, then trigger AUCTION_ITEM_LIST_UPDATE
+Mock.timers[#Mock.timers].callback()
 _G.GetNumAuctionItems = function() return 50, 100 end
 Mock.currentTime = Mock.currentTime + 1.0
 tocAddonTable.Scanner.frame:Trigger("AUCTION_ITEM_LIST_UPDATE")

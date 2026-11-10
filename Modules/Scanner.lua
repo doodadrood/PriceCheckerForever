@@ -5,6 +5,10 @@ _G.PCF = PCF
 PCF.Scanner = {}
 
 local isScanning = false
+local waitingForPage = false
+local timerPending = false
+local usingModernReplicate = false
+
 local scanFrame = CreateFrame("Frame")
 local scanPage = 0
 local totalPages = 0
@@ -20,7 +24,6 @@ local scanButton = nil
 local statusContainer = nil
 local progressBar = nil
 local progressText = nil
-local elapsedAccumulator = 0
 
 local function FormatDuration(seconds)
     seconds = math.max(0, math.ceil(seconds or 0))
@@ -46,6 +49,14 @@ local function IsScanButtonEnabled()
     return true
 end
 
+local function SafeUnregisterScanEvents()
+    pcall(scanFrame.UnregisterEvent, scanFrame, "AUCTION_ITEM_LIST_UPDATE")
+    if usingModernReplicate then
+        pcall(scanFrame.UnregisterEvent, scanFrame, "REPLICATE_ITEM_LIST_UPDATE")
+        usingModernReplicate = false
+    end
+end
+
 local function UpdateScanUI(state, messageOverride)
     if not uiCreated or not scanButton or not progressBar or not progressText then
         return
@@ -64,20 +75,21 @@ local function UpdateScanUI(state, messageOverride)
         statusContainer:Show()
 
         if totalPages > 0 and scanPage > 0 then
-            local pct = math.min(100, math.floor((scanPage / totalPages) * 100))
+            local displayPage = math.min(scanPage, totalPages)
+            local pct = math.min(100, math.floor((displayPage / totalPages) * 100))
             progressBar:SetMinMaxValues(0, totalPages)
-            progressBar:SetValue(scanPage)
+            progressBar:SetValue(displayPage)
             progressBar:SetStatusBarColor(0.15, 0.60, 0.95, 0.90)
 
             local elapsed = math.max(0.01, GetTime() - scanStartTime)
-            local avgPerPage = elapsed / scanPage
-            local remainingPages = math.max(0, totalPages - scanPage)
+            local avgPerPage = elapsed / displayPage
+            local remainingPages = math.max(0, totalPages - displayPage)
             local etaSeconds = remainingPages * avgPerPage
 
             progressText:SetText(string.format(
                 "%d%%  (%d/%d pg)  ETA: %s",
                 pct,
-                scanPage,
+                displayPage,
                 totalPages,
                 FormatDuration(etaSeconds)
             ))
@@ -178,8 +190,9 @@ local function CreateAuctionHouseUI()
         GameTooltip:SetOwner(self, "ANCHOR_BOTTOMRIGHT")
         GameTooltip:AddLine("PriceCheckerForever AH Scanner", 0, 1, 0)
         if isScanning then
-            local pct = totalPages > 0 and math.min(100, math.floor((scanPage / totalPages) * 100)) or 0
-            GameTooltip:AddLine(string.format("Progress: %d%% (Page %d of %d)", pct, scanPage, totalPages), 1, 1, 1)
+            local displayPage = totalPages > 0 and math.min(scanPage, totalPages) or scanPage
+            local pct = totalPages > 0 and math.min(100, math.floor((displayPage / totalPages) * 100)) or 0
+            GameTooltip:AddLine(string.format("Progress: %d%% (Page %d of %d)", pct, displayPage, totalPages), 1, 1, 1)
             GameTooltip:AddLine(string.format("Auctions Scanned: %d / %d", scannedAuctionsCount, totalAuctionsCount), 0.8, 0.8, 0.8)
             GameTooltip:AddLine(string.format("Unique Items Updated: %d", uniqueItemsScanned), 0.8, 0.8, 0.8)
             GameTooltip:AddLine("Click to stop the current scan.", 1, 0.4, 0.4)
@@ -255,16 +268,6 @@ local function CreateAuctionHouseUI()
         end
     end
 
-    -- Periodic timer refresh while scanning so elapsed time ticks smoothly
-    statusContainer:SetScript("OnUpdate", function(_, elapsed)
-        if not isScanning then return end
-        elapsedAccumulator = elapsedAccumulator + (elapsed or 0)
-        if elapsedAccumulator >= 0.25 then
-            elapsedAccumulator = 0
-            UpdateScanUI("SCANNING")
-        end
-    end)
-
     uiCreated = true
     PCF.Scanner.scanButton = scanButton
     PCF.Scanner.progressBar = progressBar
@@ -308,24 +311,42 @@ end
 
 local function FinishScan()
     isScanning = false
-    scanFrame:UnregisterEvent("AUCTION_ITEM_LIST_UPDATE")
-    scanFrame:UnregisterEvent("REPLICATE_ITEM_LIST_UPDATE")
+    waitingForPage = false
+    timerPending = false
+    SafeUnregisterScanEvents()
     PCF_DB = PCF_DB or {}
     PCF_DB.lastFullScan = time()
     UpdateScanUI("COMPLETE")
     print(string.format("|cff00ff00[PCF]|r Full AH scan complete! (%d unique items updated)", uniqueItemsScanned))
 end
 
-local function RequestNextLegacyPage()
-    if not isScanning then return end
-    if CanSendAuctionQuery and CanSendAuctionQuery() then
-        QueryAuctionItems("", nil, nil, 0, 0, 0, scanPage, false, -1, false)
-    else
-        C_Timer.After(0.15, RequestNextLegacyPage)
-    end
+local function ScheduleNextLegacyPage(delay)
+    if timerPending or not isScanning then return end
+    timerPending = true
+    C_Timer.After(delay or 0.15, function()
+        timerPending = false
+        if not isScanning then return end
+        if totalPages > 0 and scanPage >= totalPages then
+            FinishScan()
+            return
+        end
+        if CanSendAuctionQuery and CanSendAuctionQuery() then
+            waitingForPage = true
+            QueryAuctionItems("", nil, nil, 0, 0, 0, scanPage, false, -1, false)
+        else
+            ScheduleNextLegacyPage(0.15)
+        end
+    end)
 end
 
 local function ProcessPage()
+    if not isScanning or not waitingForPage then
+        return
+    end
+    -- Immediately clear waitingForPage so secondary AUCTION_ITEM_LIST_UPDATE
+    -- events for the same page (as item names/sellers resolve) are ignored
+    waitingForPage = false
+
     local numBatchAuctions, totalAuctions = GetNumAuctionItems("list")
     numBatchAuctions = numBatchAuctions or 0
     totalAuctions = totalAuctions or 0
@@ -343,13 +364,18 @@ local function ProcessPage()
     UpdateScanUI("SCANNING")
 
     if numBatchAuctions >= 50 and scanPage < totalPages and isScanning then
-        C_Timer.After(0.15, RequestNextLegacyPage)
+        ScheduleNextLegacyPage(0.15)
     else
         FinishScan()
     end
 end
 
 local function ProcessModernReplicate()
+    if not isScanning or not waitingForPage then
+        return
+    end
+    waitingForPage = false
+
     if not C_AuctionHouse or not C_AuctionHouse.GetNumReplicateItems then
         FinishScan()
         return
@@ -377,7 +403,7 @@ local function ProcessModernReplicate()
         UpdateScanUI("SCANNING")
 
         if index < numItems then
-            C_Timer.After(0.01, ProcessBatch)
+            C_Timer.After(0.02, ProcessBatch)
         else
             FinishScan()
         end
@@ -401,8 +427,9 @@ end
 function PCF.Scanner.StopScan(reason)
     if not isScanning then return end
     isScanning = false
-    scanFrame:UnregisterEvent("AUCTION_ITEM_LIST_UPDATE")
-    scanFrame:UnregisterEvent("REPLICATE_ITEM_LIST_UPDATE")
+    waitingForPage = false
+    timerPending = false
+    SafeUnregisterScanEvents()
     UpdateScanUI("ABORTED", reason or "Scan Aborted")
     print("|cffff0000[PCF]|r " .. (reason or "Scan aborted."))
 end
@@ -423,6 +450,9 @@ function PCF.Scanner.StartScan()
     -- Modern C_AuctionHouse replication path if legacy QueryAuctionItems is unavailable
     if not QueryAuctionItems and C_AuctionHouse and C_AuctionHouse.ReplicateItems then
         isScanning = true
+        waitingForPage = true
+        timerPending = false
+        usingModernReplicate = true
         scanPage = 0
         totalPages = 0
         totalAuctionsCount = 0
@@ -432,7 +462,7 @@ function PCF.Scanner.StartScan()
         seenInScan = {}
         UpdateScanUI("SCANNING", "Requesting AH data...")
 
-        scanFrame:RegisterEvent("REPLICATE_ITEM_LIST_UPDATE")
+        pcall(scanFrame.RegisterEvent, scanFrame, "REPLICATE_ITEM_LIST_UPDATE")
         C_AuctionHouse.ReplicateItems()
         print("|cff00ff00[PCF]|r Starting full AH scan...")
         return
@@ -445,6 +475,9 @@ function PCF.Scanner.StartScan()
     end
 
     isScanning = true
+    waitingForPage = true
+    timerPending = false
+    usingModernReplicate = false
     scanPage = 0
     totalPages = 0
     totalAuctionsCount = 0
