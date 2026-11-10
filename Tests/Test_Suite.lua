@@ -13,6 +13,7 @@ require("Providers.TSMProvider")
 require("Providers.AuctionatorProvider")
 require("Providers.NativeProvider")
 require("Modules.Consensus")
+require("Modules.MeshSync")
 require("Modules.Scanner")
 require("Modules.ChatListener")
 require("Modules.Tooltip")
@@ -44,8 +45,8 @@ Assert(PCF.Formatter.FormatMoney(1250) == "12s 50c", "Format silver and copper")
 Assert(PCF.Formatter.FormatMoney(3501250) == "350g 12s 50c", "Format gold, silver, copper")
 Assert(PCF.Formatter.FormatTooltipMoney(nil) == "??", "Format unknown tooltip money as ??")
 Assert(PCF.Formatter.FormatTooltipMoney(0) == "??", "Format 0 tooltip money as ??")
-Assert(PCF.Formatter.FormatTooltipMoney(303) == "3s3c", "Format compact tooltip money 3s3c")
-Assert(PCF.Formatter.FormatTooltipMoney(3501250) == "350g12s50c", "Format compact tooltip money XgXsXc")
+Assert(PCF.Formatter.FormatTooltipMoney(303) == "3|TInterface\\MoneyFrame\\UI-SilverIcon:0:0:2:0|t 3|TInterface\\MoneyFrame\\UI-CopperIcon:0:0:2:0|t", "Format tooltip money with silver and copper coin icons")
+Assert(PCF.Formatter.FormatTooltipMoney(3501250) == "350|TInterface\\MoneyFrame\\UI-GoldIcon:0:0:2:0|t 12|TInterface\\MoneyFrame\\UI-SilverIcon:0:0:2:0|t 50|TInterface\\MoneyFrame\\UI-CopperIcon:0:0:2:0|t", "Format tooltip money with gold, silver, and copper coin icons")
 
 -- 3. Provider Fallback Test (Vendor Sell)
 local price, source = PCF.ProviderRegistry.ResolvePrice(link1, id1)
@@ -187,18 +188,87 @@ _G.GameTooltip:ClearLines()
 _G.GameTooltip:AddLine("Linen Cloth")
 _G.GameTooltip:AddLine("Sell Price: 3s3c")
 _G.GameTooltip:SetItem("Linen Cloth", "|cffffffff|Hitem:2589:0:0:0|h[Linen Cloth]|h|r")
-Assert(_G.GameTooltip.lines[#_G.GameTooltip.lines] == "AH Price: ??", "Tooltip displays 'AH Price: ??' below Sell Price when AH price is unknown")
+Assert(_G.GameTooltip.lines[#_G.GameTooltip.lines] == "AH  Price: ??", "Tooltip displays aligned 'AH  Price: ??' below Sell Price when AH price is unknown")
 
 _G.GameTooltip:ClearLines()
 _G.GameTooltip:AddLine("Arcanite Bar")
 _G.GameTooltip:AddLine("Sell Price: 10s")
 _G.GameTooltip:SetItem("Arcanite Bar", "|cff1eff00|Hitem:12360:0:0:0|h[Arcanite Bar]|h|r")
-Assert(_G.GameTooltip.lines[#_G.GameTooltip.lines] == "AH Price: 14g50s", "Tooltip displays 'AH Price: 14g50s' below Sell Price when AH price is known")
+Assert(_G.GameTooltip.lines[#_G.GameTooltip.lines] == "AH  Price: 14|TInterface\\MoneyFrame\\UI-GoldIcon:0:0:2:0|t 50|TInterface\\MoneyFrame\\UI-SilverIcon:0:0:2:0|t", "Tooltip displays aligned 'AH  Price:' with coin icons when AH price is known")
 
 -- Verify toggling off hides button and suppresses tooltip again
 SlashCmdList["PRICECHECKERFOREVER"]("button")
 Assert(PCF_DB.settings.showScanButton == false and tocAddonTable.Scanner.scanButton.shown == false, "/pcf button hides AH scan button when toggled OFF")
 SlashCmdList["PRICECHECKERFOREVER"]("tooltip")
 Assert(PCF_DB.settings.showTooltip == false, "/pcf tooltip toggles showTooltip OFF")
+
+-- 8. Passive Browse-Sniffing Tests (AUCTION_ITEM_LIST_UPDATE while not scanning)
+Mock.auctionListings = {
+    { name = "Lesser Moonstone", itemId = 1705, count = 5, minBid = 3000, buyoutPrice = 3500 }, -- 700c unit
+    { name = "Lesser Moonstone", itemId = 1705, count = 2, minBid = 1200, buyoutPrice = 1240 }, -- 620c unit (lowest!)
+    { name = "Dreamfoil", itemId = 13463, count = 20, minBid = 180000, buyoutPrice = 200000 }, -- 10000c unit (1g)
+}
+_G.GetNumAuctionItems = function() return #Mock.auctionListings, #Mock.auctionListings end
+_G.GetAuctionItemInfo = function(_, index)
+    local e = Mock.auctionListings[index]
+    if not e then return nil end
+    return e.name, nil, e.count, 1, nil, 1, nil, e.minBid, 0, e.buyoutPrice, 0, nil, 0, "Seller", nil, 0, e.itemId
+end
+
+tocAddonTable.Scanner.frame:Trigger("AUCTION_ITEM_LIST_UPDATE")
+Assert(PCF_DB.prices[1705] and PCF_DB.prices[1705].minBuyout == 620, "Passive browse-sniffing computes lowest unit buyout (1240 / 2 = 620c)")
+Assert(PCF_DB.prices[1705].source == "PCF Sniff", "Passive browse-sniffing tags entry source as 'PCF Sniff'")
+Assert(PCF_DB.prices[13463] and PCF_DB.prices[13463].minBuyout == 10000, "Passive browse-sniffing records multiple unique items from visible page")
+
+local sniffPrice, sniffSource = tocAddonTable.ProviderRegistry.ResolvePrice("|cff1eff00|Hitem:1705:0:0:0|h[Lesser Moonstone]|h|r", 1705)
+Assert(sniffPrice == 620 and sniffSource:find("^PCF Sniff") ~= nil, "NativeProvider reports 'PCF Sniff' source tag for sniffed items")
+
+-- 9. Third-Party Addon Channel Eavesdropping Tests
+tocAddonTable.MeshSync.frame:Trigger("CHAT_MSG_ADDON", "TSM_SYNC", "16203:85000|16204:12000", "GUILD", "OtherGuildie")
+Assert(PCF_DB.prices[16203] and PCF_DB.prices[16203].minBuyout == 85000 and PCF_DB.prices[16203].source == "PCF Sniff", "Eavesdrop external addon channel and cache item market value as 'PCF Sniff'")
+
+-- 10. Peer-to-Peer Mesh Sync Chunking (<255 bytes), Deserialization, and 30-Min Cooldown Tests
+for i = 1, 35 do
+    local fakeItemId = 30000 + i
+    PCF_DB.prices[fakeItemId] = {
+        minBuyout = 100000 + (i * 500),
+        minBid = 100000,
+        lastUpdated = math.floor(Mock.currentTime),
+        count = 1,
+        source = "Scan",
+    }
+end
+
+local deltaChunks = tocAddonTable.MeshSync.BuildDeltaChunks(0)
+Assert(#deltaChunks >= 4, "Split large delta set into multiple addon message chunks")
+for idx, chunk in ipairs(deltaChunks) do
+    Assert(#chunk <= 255 and chunk:find("^DELTA:") ~= nil, string.format("Chunk %d respects <255 byte limit (%d bytes)", idx, #chunk))
+end
+
+-- Clear and deserialize chunks back into PCF_DB.prices
+PCF_DB.prices = {}
+local totalApplied = 0
+for _, chunk in ipairs(deltaChunks) do
+    totalApplied = totalApplied + tocAddonTable.MeshSync.ApplyDeltaPayload(chunk)
+end
+Assert(totalApplied >= 35 and PCF_DB.prices[30001] and PCF_DB.prices[30001].minBuyout == 100500, "Deserialize all chunked DELTA payloads accurately")
+Assert(PCF_DB.prices[30001].source == "PCF Mesh", "Tag peer-synced items with 'PCF Mesh' source")
+
+local meshPrice, meshSource = tocAddonTable.ProviderRegistry.ResolvePrice("|cffffffff|Hitem:30001:0:0:0|h[Item]|h|r", 30001)
+Assert(meshPrice == 100500 and meshSource:find("^PCF Mesh") ~= nil, "NativeProvider reports 'PCF Mesh' source tag for peer-synced items")
+
+-- 30-Minute Digest Request Cooldown Verification
+tocAddonTable.MeshSync.ResetCooldowns()
+local msgCountBefore = #Mock.addonMessages
+local sent1 = tocAddonTable.MeshSync.RequestDigest(false)
+Assert(sent1 == true and #Mock.addonMessages == msgCountBefore + 1, "Send initial REQ_DIGEST when not on cooldown")
+
+Mock.currentTime = Mock.currentTime + 600 -- Only 10 minutes later (< 30 minutes)
+local sent2 = tocAddonTable.MeshSync.RequestDigest(false)
+Assert(sent2 == false and #Mock.addonMessages == msgCountBefore + 1, "Suppress duplicate REQ_DIGEST within 30-minute cooldown window")
+
+Mock.currentTime = Mock.currentTime + 1300 -- Now > 30 minutes (1900s total) elapsed
+local sent3 = tocAddonTable.MeshSync.RequestDigest(false)
+Assert(sent3 == true and #Mock.addonMessages == msgCountBefore + 2, "Allow REQ_DIGEST after 30-minute cooldown expires")
 
 print("\n--- All Unit Tests Passed Successfully ---")

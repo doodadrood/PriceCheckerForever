@@ -4,6 +4,10 @@ _G.PCF = PCF
 
 PCF.Formatter = {}
 
+local GOLD_ICON = "|TInterface\\MoneyFrame\\UI-GoldIcon:0:0:2:0|t"
+local SILVER_ICON = "|TInterface\\MoneyFrame\\UI-SilverIcon:0:0:2:0|t"
+local COPPER_ICON = "|TInterface\\MoneyFrame\\UI-CopperIcon:0:0:2:0|t"
+
 function PCF.Formatter.FormatMoney(copper)
     if not copper or copper <= 0 then return "0c" end
     copper = math.floor(copper)
@@ -21,13 +25,16 @@ end
 function PCF.Formatter.FormatTooltipMoney(copper)
     if not copper or copper <= 0 then return "??" end
     copper = math.floor(copper)
+    if _G.GetCoinTextureString then
+        return _G.GetCoinTextureString(copper)
+    end
     local g = math.floor(copper / 10000)
     local s = math.floor((copper % 10000) / 100)
     local c = copper % 100
 
     local parts = {}
-    if g > 0 then table.insert(parts, string.format("%dg", g)) end
-    if s > 0 then table.insert(parts, string.format("%ds", s)) end
-    if c > 0 or #parts == 0 then table.insert(parts, string.format("%dc", c)) end
-    return table.concat(parts, "")
+    if g > 0 then table.insert(parts, string.format("%d%s", g, GOLD_ICON)) end
+    if s > 0 then table.insert(parts, string.format("%d%s", s, SILVER_ICON)) end
+    if c > 0 or #parts == 0 then table.insert(parts, string.format("%d%s", c, COPPER_ICON)) end
+    return table.concat(parts, " ")
 end

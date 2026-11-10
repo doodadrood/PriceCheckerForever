@@ -2,8 +2,10 @@
 local Mock = {
     chatMessages = {},
     addonMessages = {},
+    registeredPrefixes = {},
     timers = {},
     currentTime = 1000.0,
+    auctionListings = {},
 }
 
 _G.SlashCmdList = _G.SlashCmdList or {}
@@ -13,8 +15,12 @@ _G.time = function() return math.floor(Mock.currentTime) end
 _G.UnitName = function(unit) return unit == "player" and "LocalPlayer" or "TargetPlayer" end
 
 _G.C_ChatInfo = {
-    RegisterAddonMessagePrefix = function(prefix) return true end,
+    RegisterAddonMessagePrefix = function(prefix)
+        Mock.registeredPrefixes[prefix] = true
+        return true
+    end,
     SendAddonMessage = function(prefix, msg, channel)
+        assert(type(msg) == "string" and #msg <= 255, "SendAddonMessage payload exceeds 255-byte Blizzard limit: " .. tostring(#(msg or "")))
         table.insert(Mock.addonMessages, { prefix = prefix, msg = msg, channel = channel })
     end
 }
@@ -28,6 +34,16 @@ _G.C_Timer = {
         table.insert(Mock.timers, { executeAt = Mock.currentTime + delay, delay = delay, callback = callback })
     end
 }
+
+_G.GetNumAuctionItems = function(listType)
+    return #Mock.auctionListings, #Mock.auctionListings
+end
+
+_G.GetAuctionItemInfo = function(listType, index)
+    local entry = Mock.auctionListings[index]
+    if not entry then return nil end
+    return entry.name or "MockItem", nil, entry.count or 1, 1, nil, 1, nil, entry.minBid or entry.buyoutPrice or 0, 0, entry.buyoutPrice or 0, 0, nil, 0, "Seller", nil, 0, entry.itemId
+end
 
 _G.CreateFrame = function(frameType, name, parent, template)
     local frame = {

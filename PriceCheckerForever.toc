@@ -2,7 +2,7 @@
 ## Title: PriceCheckerForever |cff00ccff(PCF)|r
 ## Notes: Automated price-check responses for guild chat and whispers with multi-addon fallbacks and native scanning.
 ## Author: PCF Dev Team
-## Version: 1.0.5
+## Version: 1.0.6
 ## SavedVariables: PCF_DB
 ## OptionalDeps: TradeSkillMaster, Auctionator
 ## X-Curse-Project-ID: 1795463
@@ -15,6 +15,7 @@ Providers/TSMProvider.lua
 Providers/AuctionatorProvider.lua
 Providers/NativeProvider.lua
 Modules/Consensus.lua
+Modules/MeshSync.lua
 Modules/Scanner.lua
 Modules/ChatListener.lua
 Modules/Tooltip.lua

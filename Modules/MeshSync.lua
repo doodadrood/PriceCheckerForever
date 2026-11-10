@@ -1,0 +1,352 @@
+local _, PCF = ...
+PCF = type(PCF) == "table" and PCF or _G.PCF or {}
+_G.PCF = PCF
+
+PCF.MeshSync = {}
+
+local SYNC_PREFIX = "PCF_SYNC"
+local LEGACY_SYNC_PREFIX = "GPC_SYNC"
+local EXTERNAL_PREFIXES = {
+    TSM_SYNC = true,
+    ATR_SYNC = true,
+    Auctionator = true,
+    AUX_SYNC = true,
+}
+
+local MAX_ADDON_MSG_BYTES = 245 -- Below Blizzard's 255-byte SendAddonMessage ceiling
+local MAX_ITEMS_PER_CHUNK = 15
+local DIGEST_COOLDOWN_SEC = 1800 -- 30 minutes minimum between REQ_DIGEST broadcasts
+local HEARTBEAT_INTERVAL_SEC = 600 -- 10 minutes between dirty-item gossip broadcasts
+local SEND_PACE_SEC = 0.20 -- 5 messages/sec max outbound drain rate
+
+local lastDigestRequestTime = -DIGEST_COOLDOWN_SEC
+local pendingDigestReplyId = 0
+local dirtyItems = {}
+local dirtyCount = 0
+local outboundQueue = {}
+local queueHead = 1
+local queueTail = 0
+local queueDrainPending = false
+local heartbeatPending = false
+
+local function RegisterPrefix(prefix)
+    if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
+        C_ChatInfo.RegisterAddonMessagePrefix(prefix)
+    elseif RegisterAddonMessagePrefix then
+        RegisterAddonMessagePrefix(prefix)
+    end
+end
+
+local function SendAddonMsg(prefix, message, channel)
+    if C_ChatInfo and C_ChatInfo.SendAddonMessage then
+        C_ChatInfo.SendAddonMessage(prefix, message, channel)
+    elseif SendAddonMessage then
+        SendAddonMessage(prefix, message, channel)
+    end
+end
+
+local function IsSelfSender(sender)
+    if not sender then return false end
+    local playerName = UnitName and UnitName("player")
+    if not playerName then return false end
+    if sender == playerName then return true end
+    local shortSender = sender:match("^([^%-]+)")
+    return shortSender == playerName
+end
+
+local function DrainOutboundQueue()
+    queueDrainPending = false
+    if queueHead > queueTail then
+        queueHead = 1
+        queueTail = 0
+        return
+    end
+
+    local msg = outboundQueue[queueHead]
+    outboundQueue[queueHead] = nil
+    queueHead = queueHead + 1
+
+    if msg and PCF_DB and PCF_DB.settings and PCF_DB.settings.enablePeerSync ~= false then
+        SendAddonMsg(SYNC_PREFIX, msg, "GUILD")
+    end
+
+    if queueHead <= queueTail then
+        queueDrainPending = true
+        C_Timer.After(SEND_PACE_SEC, DrainOutboundQueue)
+    else
+        queueHead = 1
+        queueTail = 0
+    end
+end
+
+local function EnqueueOutboundMessages(chunks, immediateFirst)
+    if not chunks or #chunks == 0 then return end
+    local startIndex = 1
+    if immediateFirst and not queueDrainPending and queueHead > queueTail then
+        SendAddonMsg(SYNC_PREFIX, chunks[1], "GUILD")
+        startIndex = 2
+    end
+    for i = startIndex, #chunks do
+        queueTail = queueTail + 1
+        outboundQueue[queueTail] = chunks[i]
+    end
+    if queueHead <= queueTail and not queueDrainPending then
+        queueDrainPending = true
+        C_Timer.After(SEND_PACE_SEC, DrainOutboundQueue)
+    end
+end
+
+-- Packs price records into compact "DELTA:<itemId>:<buyout>:<timestamp>|..." chunks
+-- strictly respecting the 255-character SendAddonMessage limit.
+function PCF.MeshSync.BuildDeltaChunks(sinceTimestamp, itemFilter)
+    if not PCF_DB or not PCF_DB.prices then return {} end
+    sinceTimestamp = tonumber(sinceTimestamp) or 0
+
+    local chunks = {}
+    local currentPrefix = "DELTA:"
+    local currentLen = #currentPrefix
+    local currentParts = {}
+    local countInChunk = 0
+
+    for itemId, data in pairs(PCF_DB.prices) do
+        if (not itemFilter or itemFilter[itemId])
+            and type(itemId) == "number"
+            and data
+            and data.minBuyout and data.minBuyout > 0
+            and (data.lastUpdated or 0) > sinceTimestamp
+        then
+            local entryStr = string.format("%d:%d:%d", itemId, math.floor(data.minBuyout), math.floor(data.lastUpdated or 0))
+            local separatorLen = countInChunk > 0 and 1 or 0
+            local projectedLen = currentLen + separatorLen + #entryStr
+
+            if countInChunk > 0 and (projectedLen > MAX_ADDON_MSG_BYTES or countInChunk >= MAX_ITEMS_PER_CHUNK) then
+                table.insert(chunks, currentPrefix .. table.concat(currentParts, "|"))
+                currentParts = {}
+                currentLen = #currentPrefix
+                countInChunk = 0
+            end
+
+            table.insert(currentParts, entryStr)
+            currentLen = currentLen + (countInChunk > 0 and 1 or 0) + #entryStr
+            countInChunk = countInChunk + 1
+        end
+    end
+
+    if countInChunk > 0 then
+        table.insert(chunks, currentPrefix .. table.concat(currentParts, "|"))
+    end
+
+    return chunks
+end
+
+-- Parses a "DELTA:<itemId>:<buyout>:<timestamp>|..." payload and merges newer entries
+function PCF.MeshSync.ApplyDeltaPayload(payload)
+    if type(payload) ~= "string" then return 0 end
+    local body = payload:match("^DELTA:(.+)$") or payload
+    if not body or body == "" then return 0 end
+
+    PCF_DB = PCF_DB or {}
+    PCF_DB.prices = PCF_DB.prices or {}
+
+    local now = time()
+    local updatedCount = 0
+
+    for itemIdStr, buyoutStr, tsStr in body:gmatch("(%d+):(%d+):(%d+)") do
+        local itemId = tonumber(itemIdStr)
+        local buyout = tonumber(buyoutStr)
+        local ts = tonumber(tsStr)
+
+        if itemId and itemId > 0 and buyout and buyout > 0 and buyout < 10000000000 and ts and ts > 0 then
+            -- Clamp peer timestamp against future clock skew
+            local safeTs = math.min(ts, now)
+            local existing = PCF_DB.prices[itemId]
+
+            if not existing or safeTs > (existing.lastUpdated or 0) or (safeTs == existing.lastUpdated and buyout < existing.minBuyout) then
+                if existing then
+                    existing.minBuyout = buyout
+                    existing.lastUpdated = safeTs
+                    existing.source = "PCF Mesh"
+                else
+                    PCF_DB.prices[itemId] = {
+                        minBuyout = buyout,
+                        minBid = buyout,
+                        lastUpdated = safeTs,
+                        count = 1,
+                        source = "PCF Mesh",
+                    }
+                end
+                updatedCount = updatedCount + 1
+            end
+
+            if safeTs > (PCF_DB.lastPeerSync or 0) then
+                PCF_DB.lastPeerSync = safeTs
+            end
+        end
+    end
+
+    return updatedCount
+end
+
+-- Passively inspects third-party addon messages for item price pairs without transmitting
+function PCF.MeshSync.SniffExternalMessage(prefix, message, sender)
+    if not PCF_DB or not PCF_DB.settings or PCF_DB.settings.enableSniffExternalAddons == false then
+        return 0
+    end
+    if type(message) ~= "string" or #message > 512 then
+        return 0
+    end
+
+    PCF_DB.prices = PCF_DB.prices or {}
+    local now = time()
+    local sniffedCount = 0
+
+    for itemIdStr, buyoutStr in message:gmatch("(%d+):(%d+)") do
+        local itemId = tonumber(itemIdStr)
+        local buyout = tonumber(buyoutStr)
+        if itemId and itemId > 0 and itemId < 500000 and buyout and buyout > 0 and buyout < 10000000000 then
+            local existing = PCF_DB.prices[itemId]
+            if not existing or now >= (existing.lastUpdated or 0) then
+                if existing then
+                    existing.minBuyout = buyout
+                    existing.lastUpdated = now
+                    existing.source = "PCF Sniff"
+                else
+                    PCF_DB.prices[itemId] = {
+                        minBuyout = buyout,
+                        minBid = buyout,
+                        lastUpdated = now,
+                        count = 1,
+                        source = "PCF Sniff",
+                    }
+                end
+                sniffedCount = sniffedCount + 1
+            end
+        end
+    end
+
+    return sniffedCount
+end
+
+local function FlushDirtyHeartbeat()
+    heartbeatPending = false
+    if dirtyCount == 0 then return end
+    if not PCF_DB or not PCF_DB.settings or PCF_DB.settings.enablePeerSync == false then
+        dirtyItems = {}
+        dirtyCount = 0
+        return
+    end
+
+    local filter = dirtyItems
+    dirtyItems = {}
+    dirtyCount = 0
+
+    local chunks = PCF.MeshSync.BuildDeltaChunks(0, filter)
+    EnqueueOutboundMessages(chunks, true)
+end
+
+function PCF.MeshSync.MarkDirty(itemId)
+    if not itemId then return end
+    if not dirtyItems[itemId] then
+        dirtyItems[itemId] = true
+        dirtyCount = dirtyCount + 1
+    end
+    if not heartbeatPending then
+        heartbeatPending = true
+        local jitteredInterval = HEARTBEAT_INTERVAL_SEC + math.random(0, 300)
+        C_Timer.After(jitteredInterval, FlushDirtyHeartbeat)
+    end
+end
+
+-- Requests a delta digest from guild peers, enforcing a strict 30-minute cooldown
+function PCF.MeshSync.RequestDigest(force)
+    if not PCF_DB or not PCF_DB.settings or PCF_DB.settings.enablePeerSync == false then
+        return false
+    end
+
+    local now = GetTime()
+    if not force and (now - lastDigestRequestTime) < DIGEST_COOLDOWN_SEC then
+        return false
+    end
+
+    lastDigestRequestTime = now
+    local sinceTs = (PCF_DB and PCF_DB.lastPeerSync) or 0
+    SendAddonMsg(SYNC_PREFIX, string.format("REQ_DIGEST:%d", sinceTs), "GUILD")
+    return true
+end
+
+function PCF.MeshSync.ResetCooldowns()
+    lastDigestRequestTime = -DIGEST_COOLDOWN_SEC
+    pendingDigestReplyId = pendingDigestReplyId + 1
+    dirtyItems = {}
+    dirtyCount = 0
+    outboundQueue = {}
+    queueHead = 1
+    queueTail = 0
+    queueDrainPending = false
+    heartbeatPending = false
+end
+
+local function HandleSyncMessage(prefix, message, channel, sender)
+    if IsSelfSender(sender) then return end
+
+    if EXTERNAL_PREFIXES[prefix] then
+        PCF.MeshSync.SniffExternalMessage(prefix, message, sender)
+        return
+    end
+
+    if prefix ~= SYNC_PREFIX and prefix ~= LEGACY_SYNC_PREFIX then
+        return
+    end
+    if not PCF_DB or not PCF_DB.settings or PCF_DB.settings.enablePeerSync == false then
+        return
+    end
+    if type(message) ~= "string" then return end
+
+    local sinceStr = message:match("^REQ_DIGEST:(%d+)$")
+    if sinceStr then
+        local sinceTs = tonumber(sinceStr) or 0
+        pendingDigestReplyId = pendingDigestReplyId + 1
+        local myReplyId = pendingDigestReplyId
+        local backoff = 0.15 + (math.random(0, 450) / 1000)
+
+        C_Timer.After(backoff, function()
+            if pendingDigestReplyId ~= myReplyId then
+                return -- Another peer already responded with a DELTA
+            end
+            local chunks = PCF.MeshSync.BuildDeltaChunks(sinceTs)
+            if #chunks > 0 then
+                dirtyItems = {}
+                dirtyCount = 0
+                EnqueueOutboundMessages(chunks, true)
+            end
+        end)
+        return
+    end
+
+    if message:find("^DELTA:") then
+        -- Suppress our pending digest election timer if another peer is already answering
+        pendingDigestReplyId = pendingDigestReplyId + 1
+        PCF.MeshSync.ApplyDeltaPayload(message)
+    end
+end
+
+function PCF.MeshSync.Init()
+    RegisterPrefix(SYNC_PREFIX)
+    RegisterPrefix(LEGACY_SYNC_PREFIX)
+    for extPrefix in pairs(EXTERNAL_PREFIXES) do
+        RegisterPrefix(extPrefix)
+    end
+
+    local frame = CreateFrame("Frame")
+    frame:RegisterEvent("CHAT_MSG_ADDON")
+    frame:SetScript("OnEvent", function(_, _, prefix, message, channel, sender)
+        HandleSyncMessage(prefix, message, channel, sender)
+    end)
+    PCF.MeshSync.frame = frame
+
+    -- Jittered initial digest request (30-90 seconds after init)
+    local loginDelay = math.random(30, 90)
+    C_Timer.After(loginDelay, function()
+        PCF.MeshSync.RequestDigest(false)
+    end)
+end

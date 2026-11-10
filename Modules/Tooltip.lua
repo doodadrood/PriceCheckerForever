@@ -39,7 +39,7 @@ local function UpdateOrAddAHPriceLine(tooltip, lineText)
             local leftFontString = _G[tooltipName .. "TextLeft" .. i]
             if leftFontString and leftFontString.GetText then
                 local existingText = leftFontString:GetText()
-                if existingText and existingText:find("^AH Price:") then
+                if existingText and existingText:find("^AH%s+Price:") then
                     leftFontString:SetText(lineText)
                     if tooltip.Show then tooltip:Show() end
                     return
@@ -66,7 +66,9 @@ function PCF.Tooltip.OnTooltipSetItem(tooltip, tooltipData)
 
     local ahPrice = PCF.ProviderRegistry.ResolveAHPrice(itemLink, itemId)
     local formatted = PCF.Formatter.FormatTooltipMoney(ahPrice)
-    local lineText = string.format("AH Price: %s", formatted)
+    -- Two spaces between "AH" and "Price:" shifts "Price:" right by 3px,
+    -- aligning "Price:" and ":" with "Sell Price:" in Friz Quadrata TT.
+    local lineText = string.format("AH  Price: %s", formatted)
 
     UpdateOrAddAHPriceLine(tooltip, lineText)
 end

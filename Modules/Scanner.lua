@@ -17,6 +17,8 @@ local scannedAuctionsCount = 0
 local uniqueItemsScanned = 0
 local scanStartTime = 0
 local seenInScan = {}
+local seenInSniff = {}
+local sniffBatchId = 0
 
 -- UI Elements attached to AuctionFrame / AuctionHouseFrame
 local uiCreated = false
@@ -49,8 +51,14 @@ local function IsScanButtonEnabled()
     return true
 end
 
+local function IsPassiveSniffingEnabled()
+    if PCF_DB and PCF_DB.settings and PCF_DB.settings.enablePassiveSniffing == false then
+        return false
+    end
+    return true
+end
+
 local function SafeUnregisterScanEvents()
-    pcall(scanFrame.UnregisterEvent, scanFrame, "AUCTION_ITEM_LIST_UPDATE")
     if usingModernReplicate then
         pcall(scanFrame.UnregisterEvent, scanFrame, "REPLICATE_ITEM_LIST_UPDATE")
         usingModernReplicate = false
@@ -276,30 +284,45 @@ local function CreateAuctionHouseUI()
     UpdateScanUI(isScanning and "SCANNING" or "IDLE")
 end
 
-local function RecordItemAuction(itemId, count, minBid, buyoutPrice, now)
+local function RecordItemAuction(itemId, count, minBid, buyoutPrice, now, sourceTag, batchMap, currentBatchId)
     if not itemId or not buyoutPrice or buyoutPrice <= 0 or not count or count <= 0 then
         return
     end
 
     local unitBuyout = math.floor(buyoutPrice / count)
+    if unitBuyout <= 0 then return end
     local unitBid = (minBid and minBid > 0) and math.floor(minBid / count) or unitBuyout
 
     PCF_DB = PCF_DB or {}
     PCF_DB.prices = PCF_DB.prices or {}
 
     local existing = PCF_DB.prices[itemId]
-    if not seenInScan[itemId] or not existing then
-        seenInScan[itemId] = true
-        uniqueItemsScanned = uniqueItemsScanned + 1
-        PCF_DB.prices[itemId] = {
-            minBuyout = unitBuyout,
-            minBid = unitBid,
-            lastUpdated = now,
-            count = count,
-        }
+    local isFirstInBatch = (batchMap[itemId] ~= currentBatchId)
+
+    if isFirstInBatch or not existing then
+        batchMap[itemId] = currentBatchId
+        if sourceTag == "Scan" then
+            uniqueItemsScanned = uniqueItemsScanned + 1
+        end
+        if existing then
+            existing.minBuyout = unitBuyout
+            existing.minBid = unitBid
+            existing.lastUpdated = now
+            existing.count = count
+            existing.source = sourceTag
+        else
+            PCF_DB.prices[itemId] = {
+                minBuyout = unitBuyout,
+                minBid = unitBid,
+                lastUpdated = now,
+                count = count,
+                source = sourceTag,
+            }
+        end
     else
         existing.count = (existing.count or 0) + count
         existing.lastUpdated = now
+        existing.source = sourceTag
         if unitBuyout < existing.minBuyout then
             existing.minBuyout = unitBuyout
         end
@@ -307,6 +330,45 @@ local function RecordItemAuction(itemId, count, minBid, buyoutPrice, now)
             existing.minBid = unitBid
         end
     end
+
+    if PCF.MeshSync and PCF.MeshSync.MarkDirty then
+        PCF.MeshSync.MarkDirty(itemId)
+    end
+end
+
+-- Passively sniffs up to 50 visible items on the current AH page in a single pass
+-- without triggering server queries or pagination calls.
+function PCF.Scanner.SniffVisiblePage()
+    if isScanning or not IsPassiveSniffingEnabled() then
+        return 0
+    end
+    if not GetNumAuctionItems or not GetAuctionItemInfo then
+        return 0
+    end
+
+    local numBatchAuctions = GetNumAuctionItems("list") or 0
+    if numBatchAuctions <= 0 then
+        return 0
+    end
+
+    local limit = math.min(numBatchAuctions, 50)
+    local now = time()
+    sniffBatchId = sniffBatchId + 1
+    local currentBatchId = sniffBatchId
+    local sniffedItems = 0
+
+    for i = 1, limit do
+        local _, _, count, _, _, _, _, minBid, _, buyoutPrice, _, _, _, _, _, _, itemId = GetAuctionItemInfo("list", i)
+        if itemId and buyoutPrice and buyoutPrice > 0 and count and count > 0 then
+            local wasSeen = (seenInSniff[itemId] == currentBatchId)
+            RecordItemAuction(itemId, count, minBid, buyoutPrice, now, "PCF Sniff", seenInSniff, currentBatchId)
+            if not wasSeen and seenInSniff[itemId] == currentBatchId then
+                sniffedItems = sniffedItems + 1
+            end
+        end
+    end
+
+    return sniffedItems
 end
 
 local function FinishScan()
@@ -356,7 +418,7 @@ local function ProcessPage()
     local now = time()
     for i = 1, numBatchAuctions do
         local name, _, count, _, _, _, _, minBid, _, buyoutPrice, _, _, _, _, _, _, itemId = GetAuctionItemInfo("list", i)
-        RecordItemAuction(itemId, count, minBid, buyoutPrice, now)
+        RecordItemAuction(itemId, count, minBid, buyoutPrice, now, "Scan", seenInScan, true)
     end
 
     scanPage = scanPage + 1
@@ -395,7 +457,7 @@ local function ProcessModernReplicate()
         local limit = math.min(index + batchSize - 1, numItems - 1)
         for i = index, limit do
             local _, _, count, _, _, _, _, minBid, _, buyoutPrice, _, _, _, _, _, _, itemId = C_AuctionHouse.GetReplicateItemInfo(i)
-            RecordItemAuction(itemId, count, minBid, buyoutPrice, now)
+            RecordItemAuction(itemId, count, minBid, buyoutPrice, now, "Scan", seenInScan, true)
         end
         index = limit + 1
         scanPage = scanPage + 1
@@ -492,9 +554,10 @@ function PCF.Scanner.StartScan()
     print("|cff00ff00[PCF]|r Starting full AH scan...")
 end
 
--- Unified event handler for AH window lifecycle and scan paging
+-- Unified event handler for AH window lifecycle, full scan paging, and passive browse-sniffing
 scanFrame:RegisterEvent("AUCTION_HOUSE_SHOW")
 scanFrame:RegisterEvent("AUCTION_HOUSE_CLOSED")
+scanFrame:RegisterEvent("AUCTION_ITEM_LIST_UPDATE")
 scanFrame:SetScript("OnEvent", function(_, event)
     if event == "AUCTION_HOUSE_SHOW" then
         CreateAuctionHouseUI()
@@ -505,6 +568,8 @@ scanFrame:SetScript("OnEvent", function(_, event)
     elseif event == "AUCTION_ITEM_LIST_UPDATE" then
         if isScanning then
             ProcessPage()
+        else
+            PCF.Scanner.SniffVisiblePage()
         end
     elseif event == "REPLICATE_ITEM_LIST_UPDATE" then
         if isScanning then

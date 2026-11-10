@@ -3,6 +3,7 @@ PCF = type(PCF) == "table" and PCF or _G.PCF or {}
 _G.PCF = PCF
 
 PCF_DB = PCF_DB or {}
+_G.GPC_DB = PCF_DB
 
 local defaultConfig = {
     version = 1,
@@ -14,9 +15,13 @@ local defaultConfig = {
         preferredProvider = "AUTO", -- "AUTO", "TSM", "AUCTIONATOR", "NATIVE"
         showScanButton = true,
         showTooltip = true,
+        enablePassiveSniffing = true,
+        enablePeerSync = true,
+        enableSniffExternalAddons = true,
     },
-    prices = {}, -- [itemId] = { minBuyout = 0, minBid = 0, lastUpdated = 0, count = 0 }
+    prices = {}, -- [itemId] = { minBuyout = 0, minBid = 0, lastUpdated = 0, count = 0, source = "Scan" }
     lastFullScan = 0,
+    lastPeerSync = 0,
 }
 
 local function ApplyDefaults(target, defaults)
@@ -47,6 +52,7 @@ end
 
 function PCF.LoadConfig()
     PCF_DB = type(PCF_DB) == "table" and PCF_DB or {}
+    _G.GPC_DB = PCF_DB
     ApplyDefaults(PCF_DB, defaultConfig)
 
     if PCF.HasExternalAuctionAddon() then
