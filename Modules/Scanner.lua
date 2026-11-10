@@ -368,6 +368,12 @@ function PCF.Scanner.SniffVisiblePage()
             local limit = math.min(numBatchAuctions, 50)
             for i = 1, limit do
                 local _, _, count, _, _, _, _, minBid, _, buyoutPrice, _, _, _, _, _, _, itemId = GetAuctionItemInfo("list", i)
+                if (not itemId or itemId <= 0) and GetAuctionItemLink then
+                    local link = GetAuctionItemLink("list", i)
+                    if type(link) == "string" then
+                        itemId = tonumber(link:match("item:(%d+)"))
+                    end
+                end
                 if itemId and buyoutPrice and buyoutPrice > 0 and count and count > 0 then
                     local wasSeen = (seenInSniff[itemId] == currentBatchId)
                     RecordItemAuction(itemId, count, minBid, buyoutPrice, now, "PCF Sniff", seenInSniff, currentBatchId)
@@ -375,6 +381,9 @@ function PCF.Scanner.SniffVisiblePage()
                         sniffedItems = sniffedItems + 1
                     end
                 end
+            end
+            if sniffedItems > 0 and PCF.Tooltip and PCF.Tooltip.RefreshVisibleTooltip then
+                PCF.Tooltip.RefreshVisibleTooltip()
             end
             return sniffedItems
         end
@@ -384,7 +393,7 @@ function PCF.Scanner.SniffVisiblePage()
     if C_AuctionHouse and C_AuctionHouse.GetBrowseResults then
         local ok, results = pcall(C_AuctionHouse.GetBrowseResults)
         if ok and type(results) == "table" then
-            local limit = math.min(#results, 50)
+            local limit = math.min(#results, 500)
             for i = 1, limit do
                 local row = results[i]
                 local itemId = row and row.itemKey and row.itemKey.itemID
@@ -404,7 +413,247 @@ function PCF.Scanner.SniffVisiblePage()
         end
     end
 
+    if sniffedItems > 0 and PCF.Tooltip and PCF.Tooltip.RefreshVisibleTooltip then
+        PCF.Tooltip.RefreshVisibleTooltip()
+    end
+
     return sniffedItems
+end
+
+local function GetActiveSellFrameItem()
+    local ahFrame = _G.AuctionHouseFrame
+    if not ahFrame then
+        return nil, nil
+    end
+
+    local sellFrames = {
+        ahFrame.CommoditiesSellFrame,
+        ahFrame.ItemSellFrame,
+    }
+
+    for _, sellFrame in ipairs(sellFrames) do
+        if sellFrame and (not sellFrame.IsShown or sellFrame:IsShown()) then
+            local itemKey = sellFrame.GetItemKey and sellFrame:GetItemKey()
+            local itemLoc = (sellFrame.GetItem and sellFrame:GetItem()) or sellFrame.itemLocation
+            local itemId = (type(itemKey) == "table" and itemKey.itemID) or nil
+
+            if not itemId and itemLoc then
+                if C_Item and C_Item.GetItemID then
+                    local okId, resolvedId = pcall(C_Item.GetItemID, itemLoc)
+                    if okId and resolvedId then
+                        itemId = resolvedId
+                    end
+                end
+                if not itemKey and C_AuctionHouse and C_AuctionHouse.GetItemKeyFromItem then
+                    local okKey, resolvedKey = pcall(C_AuctionHouse.GetItemKeyFromItem, itemLoc)
+                    if okKey and type(resolvedKey) == "table" then
+                        itemKey = resolvedKey
+                        itemId = itemId or resolvedKey.itemID
+                    end
+                end
+            end
+
+            if itemId and itemId > 0 then
+                return itemId, itemKey
+            end
+        end
+    end
+
+    return nil, nil
+end
+
+-- Passively sniffs Commodity search listings (triggered when placing stackable items
+-- into the Sell window or viewing a commodity's listings in the Buy tab).
+function PCF.Scanner.SniffCommoditySearchResults(itemId)
+    if isScanning or not IsPassiveSniffingEnabled() then
+        return 0
+    end
+    if not C_AuctionHouse or not C_AuctionHouse.GetNumCommoditySearchResults or not C_AuctionHouse.GetCommoditySearchResultInfo then
+        return 0
+    end
+
+    if not itemId then
+        itemId = GetActiveSellFrameItem()
+    end
+    itemId = tonumber(itemId)
+    if not itemId or itemId <= 0 then
+        return 0
+    end
+
+    local okNum, numResults = pcall(C_AuctionHouse.GetNumCommoditySearchResults, itemId)
+    if not okNum or not numResults or numResults <= 0 then
+        return 0
+    end
+
+    local now = time()
+    sniffBatchId = sniffBatchId + 1
+    local currentBatchId = sniffBatchId
+    local limit = math.min(numResults, 50)
+    local updated = 0
+
+    for i = 1, limit do
+        local okInfo, result = pcall(C_AuctionHouse.GetCommoditySearchResultInfo, itemId, i)
+        if okInfo and type(result) == "table" then
+            local unitPrice = result.unitPrice
+            local quantity = (result.quantity and result.quantity > 0) and result.quantity or 1
+            if unitPrice and unitPrice > 0 then
+                local totalBuyout = unitPrice * quantity
+                RecordItemAuction(itemId, quantity, totalBuyout, totalBuyout, now, "PCF Sniff", seenInSniff, currentBatchId)
+                updated = 1
+            end
+        end
+    end
+
+    if updated > 0 and PCF.Tooltip and PCF.Tooltip.RefreshVisibleTooltip then
+        PCF.Tooltip.RefreshVisibleTooltip()
+    end
+
+    return updated
+end
+
+-- Passively sniffs Item search listings (triggered when placing non-commodity items
+-- into the Sell window or viewing an item's individual listings in the Buy tab).
+function PCF.Scanner.SniffItemSearchResults(itemKey)
+    if isScanning or not IsPassiveSniffingEnabled() then
+        return 0
+    end
+    if not C_AuctionHouse or not C_AuctionHouse.GetNumItemSearchResults or not C_AuctionHouse.GetItemSearchResultInfo then
+        return 0
+    end
+
+    if not itemKey then
+        local activeId, activeKey = GetActiveSellFrameItem()
+        itemKey = activeKey or activeId
+    end
+
+    local itemId = (type(itemKey) == "table" and itemKey.itemID) or tonumber(itemKey)
+    if not itemId or itemId <= 0 then
+        return 0
+    end
+
+    local queryKey = type(itemKey) == "table" and itemKey or { itemID = itemId, itemLevel = 0, itemSuffix = 0, battlePetSpeciesID = 0 }
+    local okNum, numResults = pcall(C_AuctionHouse.GetNumItemSearchResults, queryKey)
+    if not okNum or not numResults or numResults <= 0 then
+        return 0
+    end
+
+    local now = time()
+    sniffBatchId = sniffBatchId + 1
+    local currentBatchId = sniffBatchId
+    local limit = math.min(numResults, 50)
+    local updated = 0
+
+    for i = 1, limit do
+        local okInfo, result = pcall(C_AuctionHouse.GetItemSearchResultInfo, queryKey, i)
+        if okInfo and type(result) == "table" then
+            local buyoutAmount = (result.buyoutAmount and result.buyoutAmount > 0 and result.buyoutAmount)
+                or (result.bidAmount and result.bidAmount > 0 and result.bidAmount)
+                or (result.minBid and result.minBid > 0 and result.minBid)
+            local bidAmount = result.minBid or result.bidAmount or buyoutAmount
+            local quantity = (result.quantity and result.quantity > 0) and result.quantity or 1
+            if buyoutAmount and buyoutAmount > 0 then
+                RecordItemAuction(itemId, quantity, bidAmount, buyoutAmount, now, "PCF Sniff", seenInSniff, currentBatchId)
+                updated = 1
+            end
+        end
+    end
+
+    if updated > 0 and PCF.Tooltip and PCF.Tooltip.RefreshVisibleTooltip then
+        PCF.Tooltip.RefreshVisibleTooltip()
+    end
+
+    return updated
+end
+
+-- Fallback: if an item is placed into the Sell window and the Sell frame's PriceInput
+-- displays a unit/buyout price not yet captured by search result events, record it.
+function PCF.Scanner.SniffActiveSellFramePrice()
+    if isScanning or not IsPassiveSniffingEnabled() then
+        return 0
+    end
+
+    local itemId, itemKey = GetActiveSellFrameItem()
+    if not itemId or itemId <= 0 then
+        return 0
+    end
+
+    local updated = PCF.Scanner.SniffCommoditySearchResults(itemId)
+    if updated == 0 then
+        updated = PCF.Scanner.SniffItemSearchResults(itemKey or itemId)
+    end
+    if updated > 0 then
+        return updated
+    end
+
+    local ahFrame = _G.AuctionHouseFrame
+    if not ahFrame then
+        return 0
+    end
+
+    local sellFrames = {
+        ahFrame.CommoditiesSellFrame,
+        ahFrame.ItemSellFrame,
+    }
+
+    for _, sellFrame in ipairs(sellFrames) do
+        if sellFrame and (not sellFrame.IsShown or sellFrame:IsShown()) then
+            local priceInput = sellFrame.PriceInput
+            local amount = priceInput and priceInput.GetAmount and priceInput:GetAmount()
+            if type(amount) == "number" and amount > 0 then
+                local now = time()
+                sniffBatchId = sniffBatchId + 1
+                RecordItemAuction(itemId, 1, amount, amount, now, "PCF Sniff", seenInSniff, sniffBatchId)
+                if PCF.Tooltip and PCF.Tooltip.RefreshVisibleTooltip then
+                    PCF.Tooltip.RefreshVisibleTooltip()
+                end
+                return 1
+            end
+        end
+    end
+
+    return 0
+end
+
+local sellHooksInstalled = false
+
+local function InstallSellFrameHooks()
+    if sellHooksInstalled or not _G.hooksecurefunc then
+        return
+    end
+
+    if C_AuctionHouse and type(C_AuctionHouse.SendSellSearchQuery) == "function" then
+        pcall(_G.hooksecurefunc, C_AuctionHouse, "SendSellSearchQuery", function()
+            if not IsPassiveSniffingEnabled() then return end
+            C_Timer.After(0.15, function()
+                PCF.Scanner.SniffActiveSellFramePrice()
+            end)
+        end)
+    end
+
+    if _G.AuctionHouseFrame then
+        local sellFrames = {
+            _G.AuctionHouseFrame.CommoditiesSellFrame,
+            _G.AuctionHouseFrame.ItemSellFrame,
+        }
+        for _, sellFrame in ipairs(sellFrames) do
+            if sellFrame and type(sellFrame.SetItem) == "function" then
+                pcall(_G.hooksecurefunc, sellFrame, "SetItem", function()
+                    if not IsPassiveSniffingEnabled() then return end
+                    PCF.Scanner.SniffActiveSellFramePrice()
+                    C_Timer.After(0.20, function()
+                        PCF.Scanner.SniffActiveSellFramePrice()
+                    end)
+                end)
+            end
+            if sellFrame and type(sellFrame.UpdatePriceSelection) == "function" then
+                pcall(_G.hooksecurefunc, sellFrame, "UpdatePriceSelection", function()
+                    if not IsPassiveSniffingEnabled() then return end
+                    PCF.Scanner.SniffActiveSellFramePrice()
+                end)
+            end
+        end
+        sellHooksInstalled = true
+    end
 end
 
 local function FinishScan()
@@ -771,10 +1020,16 @@ function PCF.Scanner.Init()
     SafeRegisterEvent(scanFrame, "AUCTION_ITEM_LIST_UPDATE")
     SafeRegisterEvent(scanFrame, "AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
     SafeRegisterEvent(scanFrame, "AUCTION_HOUSE_BROWSE_RESULTS_ADDED")
+    SafeRegisterEvent(scanFrame, "COMMODITY_SEARCH_RESULTS_UPDATED")
+    SafeRegisterEvent(scanFrame, "COMMODITY_SEARCH_RESULTS_ADDED")
+    SafeRegisterEvent(scanFrame, "ITEM_SEARCH_RESULTS_UPDATED")
+    SafeRegisterEvent(scanFrame, "ITEM_SEARCH_RESULTS_ADDED")
+    SafeRegisterEvent(scanFrame, "NEW_AUCTION_UPDATE")
 
     scanFrame:SetScript("OnEvent", function(_, event, arg1)
         if event == "AUCTION_HOUSE_SHOW" then
             CreateAuctionHouseUI()
+            InstallSellFrameHooks()
         elseif event == "AUCTION_HOUSE_CLOSED" then
             if isScanning then
                 PCF.Scanner.StopScan("AH closed. Scan aborted.")
@@ -789,6 +1044,19 @@ function PCF.Scanner.Init()
             if isScanning and isBrowseScanning then
                 ProcessModernBrowseBatch(arg1)
             elseif not isScanning then
+                PCF.Scanner.SniffVisiblePage()
+            end
+        elseif event == "COMMODITY_SEARCH_RESULTS_UPDATED" or event == "COMMODITY_SEARCH_RESULTS_ADDED" then
+            if not isScanning then
+                PCF.Scanner.SniffCommoditySearchResults(arg1)
+            end
+        elseif event == "ITEM_SEARCH_RESULTS_UPDATED" or event == "ITEM_SEARCH_RESULTS_ADDED" then
+            if not isScanning then
+                PCF.Scanner.SniffItemSearchResults(arg1)
+            end
+        elseif event == "NEW_AUCTION_UPDATE" then
+            if not isScanning then
+                PCF.Scanner.SniffActiveSellFramePrice()
                 PCF.Scanner.SniffVisiblePage()
             end
         elseif event == "REPLICATE_ITEM_LIST_UPDATE" then

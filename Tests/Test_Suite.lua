@@ -292,6 +292,35 @@ Assert(PCF_DB.prices[13463] and PCF_DB.prices[13463].minBuyout == 10000, "Passiv
 local sniffPrice, sniffSource = tocAddonTable.ProviderRegistry.ResolvePrice("|cff1eff00|Hitem:1705:0:0:0|h[Lesser Moonstone]|h|r", 1705)
 Assert(sniffPrice == 620 and sniffSource:find("^PCF Sniff") ~= nil, "NativeProvider reports 'PCF Sniff' source tag for sniffed items")
 
+-- Sell window sniffing: COMMODITY_SEARCH_RESULTS_UPDATED & ITEM_SEARCH_RESULTS_UPDATED overwrite stale stored price
+_G.C_AuctionHouse = {
+    GetNumCommoditySearchResults = function(itemId)
+        return itemId == 1705 and 2 or 0
+    end,
+    GetCommoditySearchResultInfo = function(itemId, index)
+        if itemId == 1705 then
+            if index == 1 then return { itemID = 1705, quantity = 10, unitPrice = 940 } end
+            if index == 2 then return { itemID = 1705, quantity = 5, unitPrice = 1100 } end
+        end
+        return nil
+    end,
+    GetNumItemSearchResults = function(itemKey)
+        return (type(itemKey) == "table" and itemKey.itemID == 12360) and 1 or 0
+    end,
+    GetItemSearchResultInfo = function(itemKey, index)
+        if type(itemKey) == "table" and itemKey.itemID == 12360 and index == 1 then
+            return { itemKey = itemKey, buyoutAmount = 165000, minBid = 150000, quantity = 1 }
+        end
+        return nil
+    end,
+}
+tocAddonTable.Scanner.frame:Trigger("COMMODITY_SEARCH_RESULTS_UPDATED", 1705)
+Assert(PCF_DB.prices[1705] and PCF_DB.prices[1705].minBuyout == 940 and PCF_DB.prices[1705].count == 15, "Sell window COMMODITY_SEARCH_RESULTS_UPDATED updates stored item price to current sell price")
+
+tocAddonTable.Scanner.frame:Trigger("ITEM_SEARCH_RESULTS_UPDATED", { itemID = 12360 })
+Assert(PCF_DB.prices[12360] and PCF_DB.prices[12360].minBuyout == 165000, "Sell window ITEM_SEARCH_RESULTS_UPDATED updates stored item price to current sell price")
+_G.C_AuctionHouse = nil
+
 -- 9. Third-Party Addon Channel Eavesdropping Tests
 tocAddonTable.MeshSync.frame:Trigger("CHAT_MSG_ADDON", "TSM_SYNC", "16203:85000|16204:12000", "GUILD", "OtherGuildie")
 Assert(PCF_DB.prices[16203] and PCF_DB.prices[16203].minBuyout == 85000 and PCF_DB.prices[16203].source == "PCF Sniff", "Eavesdrop external addon channel and cache item market value as 'PCF Sniff'")

@@ -154,6 +154,12 @@ function PCF.Tooltip.OnTooltipSetItem(tooltip, tooltipData)
     UpdateOrAddAHPriceLine(tooltip, lineText)
 end
 
+function PCF.Tooltip.RefreshVisibleTooltip()
+    if _G.GameTooltip and (not _G.GameTooltip.IsShown or _G.GameTooltip:IsShown()) then
+        PCF.Tooltip.OnTooltipSetItem(_G.GameTooltip)
+    end
+end
+
 local function HookTooltip(tooltip)
     if not tooltip or tooltip._pcfHooked then return end
     if tooltip.HookScript then
