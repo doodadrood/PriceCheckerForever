@@ -4,24 +4,72 @@ _G.PCF = PCF
 
 PCF.Tooltip = PCF.Tooltip or {}
 
+local function IsSecret(val)
+    if val == nil then return false end
+    if _G.issecretvalue then
+        local ok, isSec = pcall(_G.issecretvalue, val)
+        if ok and isSec then
+            return true
+        end
+    end
+    return false
+end
+
+local function SafeFind(str, pattern)
+    if str == nil or IsSecret(str) then return nil end
+    local ok, res = pcall(string.find, str, pattern)
+    if ok then
+        return res
+    end
+    return nil
+end
+
+local function SafeMatch(str, pattern)
+    if str == nil or IsSecret(str) then return nil end
+    local ok, res = pcall(string.match, str, pattern)
+    if ok then
+        return res
+    end
+    return nil
+end
+
+local function SafeGetNumberFromRegion(region)
+    if not region or not region.GetText then return nil end
+    if region.IsShown and not region:IsShown() then return nil end
+    local ok, text = pcall(region.GetText, region)
+    if not ok or text == nil or IsSecret(text) then
+        return nil
+    end
+    local matchStr = SafeMatch(text, "^%s*(%d+)%s*$")
+    if matchStr then
+        return tonumber(matchStr)
+    end
+    return nil
+end
+
 local function ExtractItemFromTooltip(tooltip, tooltipData)
     local itemLink = nil
     local itemId = nil
 
     if tooltip and tooltip.GetItem then
-        local _, link = tooltip:GetItem()
-        itemLink = link
+        local ok, _, link = pcall(tooltip.GetItem, tooltip)
+        if ok and link and not IsSecret(link) then
+            itemLink = link
+        end
     end
 
-    if not itemLink and tooltipData and tooltipData.hyperlink then
+    if not itemLink and tooltipData and tooltipData.hyperlink and not IsSecret(tooltipData.hyperlink) then
         itemLink = tooltipData.hyperlink
     end
 
     if itemLink then
-        itemId = tonumber(itemLink:match("item:(%d+)"))
+        local matchStr = SafeMatch(itemLink, "item:(%d+)")
+        if matchStr then
+            itemId = tonumber(matchStr)
+        end
     end
 
-    if not itemId and tooltipData and tooltipData.id then
+    if not itemId and tooltipData and tooltipData.id and not IsSecret(tooltipData.id) then
         itemId = tonumber(tooltipData.id)
     end
 
@@ -45,7 +93,8 @@ local function QueryContainerStackCount(bag, slot, expectedItemId)
     if _G.GetContainerItemInfo then
         local ok, _, itemCount, _, _, _, _, link = pcall(_G.GetContainerItemInfo, bag, slot)
         if ok and type(itemCount) == "number" and itemCount > 1 then
-            local slotItemId = type(link) == "string" and tonumber(link:match("item:(%d+)")) or nil
+            local matchStr = SafeMatch(link, "item:(%d+)")
+            local slotItemId = matchStr and tonumber(matchStr) or nil
             if not expectedItemId or not slotItemId or slotItemId == expectedItemId then
                 return math.floor(itemCount)
             end
@@ -62,35 +111,43 @@ local function ExtractStackCount(tooltip, itemId)
         return math.floor(tooltip._pcfStackCount)
     end
 
-    local owner = tooltip.GetOwner and tooltip:GetOwner()
-    if owner then
-        if type(owner.count) == "number" and owner.count > 1 then
-            return math.floor(owner.count)
-        end
-        if type(owner.stackCount) == "number" and owner.stackCount > 1 then
-            return math.floor(owner.stackCount)
-        end
+    local ok, owner = pcall(function()
+        return tooltip.GetOwner and tooltip:GetOwner()
+    end)
+    if not ok or not owner then return 1 end
 
-        local countRegion = owner.Count or (owner.GetName and owner:GetName() and _G[owner:GetName() .. "Count"])
-        if countRegion and countRegion.GetText and (not countRegion.IsShown or countRegion:IsShown()) then
-            local text = countRegion:GetText()
-            local parsed = type(text) == "string" and tonumber(text:match("^%s*(%d+)%s*$"))
-            if parsed and parsed > 1 then
-                return math.floor(parsed)
-            end
-        end
+    -- Action bar buttons are secure action buttons and do not represent container stacks.
+    -- In modern WoW (Patch 11.0.5+ / 12.0+), their text/counts are protected secret values.
+    local isActionOrProtected = (owner.action ~= nil)
+        or (owner.buttonType ~= nil)
+        or (owner.IsProtected and owner:IsProtected())
+    if isActionOrProtected then
+        return 1
+    end
 
-        local bag = (owner.GetBagID and owner:GetBagID())
-            or owner.bagID
-            or (owner.GetParent and owner:GetParent() and owner:GetParent().GetID and owner:GetParent():GetID())
-        local slot = (owner.GetSlotIndex and owner:GetSlotIndex())
-            or owner.slotID
-            or (owner.GetID and owner:GetID())
+    if type(owner.count) == "number" and owner.count > 1 then
+        return math.floor(owner.count)
+    end
+    if type(owner.stackCount) == "number" and owner.stackCount > 1 then
+        return math.floor(owner.stackCount)
+    end
 
-        local containerCount = QueryContainerStackCount(bag, slot, itemId)
-        if containerCount and containerCount > 1 then
-            return containerCount
-        end
+    local countRegion = owner.Count or (owner.GetName and owner:GetName() and _G[owner:GetName() .. "Count"])
+    local parsed = SafeGetNumberFromRegion(countRegion)
+    if parsed and parsed > 1 then
+        return math.floor(parsed)
+    end
+
+    local bag = (owner.GetBagID and owner:GetBagID())
+        or owner.bagID
+        or (owner.GetParent and owner:GetParent() and owner:GetParent().GetID and owner:GetParent():GetID())
+    local slot = (owner.GetSlotIndex and owner:GetSlotIndex())
+        or owner.slotID
+        or (owner.GetID and owner:GetID())
+
+    local containerCount = QueryContainerStackCount(bag, slot, itemId)
+    if containerCount and containerCount > 1 then
+        return containerCount
     end
 
     return 1
@@ -106,10 +163,14 @@ local function UpdateOrAddAHPriceLine(tooltip, lineText)
         for i = 1, numLines do
             local leftFontString = _G[tooltipName .. "TextLeft" .. i]
             if leftFontString and leftFontString.GetText then
-                local existingText = leftFontString:GetText()
-                if existingText and existingText:find("^AH%s+Price:") then
-                    leftFontString:SetText(lineText)
-                    if tooltip.Show then tooltip:Show() end
+                local ok, existingText = pcall(leftFontString.GetText, leftFontString)
+                if ok and SafeFind(existingText, "^AH%s+Price:") then
+                    if leftFontString.SetText then
+                        pcall(leftFontString.SetText, leftFontString, lineText)
+                    end
+                    if tooltip.Show then
+                        pcall(tooltip.Show, tooltip)
+                    end
                     return
                 end
             end
@@ -117,41 +178,44 @@ local function UpdateOrAddAHPriceLine(tooltip, lineText)
     end
 
     if tooltip.AddLine then
-        tooltip:AddLine(lineText, 1, 1, 1)
+        pcall(tooltip.AddLine, tooltip, lineText, 1, 1, 1)
     end
     if tooltip.Show then
-        tooltip:Show()
+        pcall(tooltip.Show, tooltip)
     end
 end
 
 function PCF.Tooltip.OnTooltipSetItem(tooltip, tooltipData)
     if not tooltip then return end
-    local itemLink, itemId = ExtractItemFromTooltip(tooltip, tooltipData)
-    if not itemLink and not itemId then return end
 
-    -- Always resolve AH price first so TSM/Auctionator users passively harvest
-    -- hovered item prices into PCF_DB.prices for the guild mesh even when showTooltip is off
-    local ahPrice = PCF.ProviderRegistry.ResolveAHPrice(itemLink, itemId)
+    pcall(function()
+        local itemLink, itemId = ExtractItemFromTooltip(tooltip, tooltipData)
+        if not itemLink and not itemId then return end
 
-    if PCF_DB and PCF_DB.settings and PCF_DB.settings.showTooltip == false then
-        return
-    end
+        -- Always resolve AH price first so TSM/Auctionator users passively harvest
+        -- hovered item prices into PCF_DB.prices for the guild mesh even when showTooltip is off
+        local ahPrice = PCF.ProviderRegistry.ResolveAHPrice(itemLink, itemId)
 
-    local lineText
-    if ahPrice and ahPrice > 0 then
-        local stackCount = ExtractStackCount(tooltip, itemId)
-        local unitFormatted = PCF.Formatter.FormatTooltipMoney(ahPrice)
-        if stackCount and stackCount > 1 then
-            local stackFormatted = PCF.Formatter.FormatTooltipMoney(ahPrice * stackCount)
-            lineText = string.format("AH  Price: %s (%s)", stackFormatted, unitFormatted)
-        else
-            lineText = string.format("AH  Price: %s", unitFormatted)
+        if PCF_DB and PCF_DB.settings and PCF_DB.settings.showTooltip == false then
+            return
         end
-    else
-        lineText = "AH  Price: ??"
-    end
 
-    UpdateOrAddAHPriceLine(tooltip, lineText)
+        local lineText
+        if ahPrice and ahPrice > 0 then
+            local stackCount = ExtractStackCount(tooltip, itemId)
+            local unitFormatted = PCF.Formatter.FormatTooltipMoney(ahPrice)
+            if stackCount and stackCount > 1 then
+                local stackFormatted = PCF.Formatter.FormatTooltipMoney(ahPrice * stackCount)
+                lineText = string.format("AH  Price: %s (%s)", stackFormatted, unitFormatted)
+            else
+                lineText = string.format("AH  Price: %s", unitFormatted)
+            end
+        else
+            lineText = "AH  Price: ??"
+        end
+
+        UpdateOrAddAHPriceLine(tooltip, lineText)
+    end)
 end
 
 function PCF.Tooltip.RefreshVisibleTooltip()

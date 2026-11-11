@@ -384,6 +384,48 @@ Assert(
 )
 PCF_DB.prices[99901] = nil
 
+-- Secret string value & ActionButton security tests
+local secretString = setmetatable({}, {
+    __index = function(_, k)
+        error("attempt to index local 'text' (a secret string value, while execution tainted by 'PriceCheckerForever')")
+    end,
+    __tostring = function() return "secret" end,
+})
+_G.issecretvalue = function(v) return v == secretString end
+
+-- A. ActionButton owner with action property and secret count
+local mockActionButton = {
+    action = 1,
+    IsProtected = function() return true end,
+    Count = {
+        GetText = function() return secretString end,
+        IsShown = function() return true end,
+    },
+}
+_G.GameTooltip:SetOwner(mockActionButton)
+_G.GameTooltip:ClearLines()
+_G.GameTooltip:AddLine("Health Potion")
+local okActionHover = pcall(function()
+    _G.GameTooltip:SetItem("Health Potion", "|cffffffff|Hitem:12360:0:0:0|h[Arcanite Bar]|h|r")
+end)
+Assert(okActionHover == true, "ActionButton hover with secret count text does not crash")
+Assert(_G.GameTooltip.lines[#_G.GameTooltip.lines]:find("^AH%s+Price:"), "ActionButton hover adds AH Price line safely")
+
+-- B. Tooltip with existing secret text line does not crash when scanned for AH Price prefix
+_G.GameTooltip:SetOwner(nil)
+_G.GameTooltip:ClearLines()
+_G.GameTooltip:AddLine("Spell Tooltip")
+-- Inject a line whose GetText returns a secret value
+_G.GameTooltipTextLeft1 = {
+    GetText = function() return secretString end,
+    SetText = function() end,
+}
+local okSecretLine = pcall(function()
+    _G.GameTooltip:SetItem("Health Potion", "|cffffffff|Hitem:12360:0:0:0|h[Arcanite Bar]|h|r")
+end)
+Assert(okSecretLine == true, "Tooltip line with secret text does not crash when inspecting lines")
+_G.issecretvalue = nil
+
 -- Verify toggling off hides button and suppresses tooltip again
 SlashCmdList["PRICECHECKERFOREVER"]("button")
 Assert(PCF_DB.settings.showScanButton == false and tocAddonTable.Scanner.scanButton.shown == false, "/pcf button hides AH scan button when toggled OFF")
