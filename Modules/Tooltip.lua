@@ -6,9 +6,18 @@ PCF.Tooltip = PCF.Tooltip or {}
 
 local function IsSecret(val)
     if val == nil then return false end
+    if PCF and PCF.IsSecret then
+        return PCF.IsSecret(val)
+    end
     if _G.issecretvalue then
         local ok, isSec = pcall(_G.issecretvalue, val)
         if ok and isSec then
+            return true
+        end
+    end
+    if _G.canaccessvalue then
+        local ok, canAccess = pcall(_G.canaccessvalue, val)
+        if ok and not canAccess then
             return true
         end
     end

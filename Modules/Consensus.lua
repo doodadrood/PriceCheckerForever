@@ -31,12 +31,38 @@ local function SendAddonMsg(prefix, message, channel)
     end
 end
 
-local function ParseClaimMessage(message)
-    if type(message) ~= "string" then return nil, nil end
-    if strsplit then
-        return strsplit(":", message)
+local function IsSecret(val)
+    if val == nil then return false end
+    if PCF and PCF.IsSecret then
+        return PCF.IsSecret(val)
     end
-    return message:match("^([^:]+):(.+)$")
+    if _G.issecretvalue then
+        local ok, isSec = pcall(_G.issecretvalue, val)
+        if ok and isSec then
+            return true
+        end
+    end
+    if _G.canaccessvalue then
+        local ok, canAccess = pcall(_G.canaccessvalue, val)
+        if ok and not canAccess then
+            return true
+        end
+    end
+    return false
+end
+
+local function ParseClaimMessage(message)
+    if type(message) ~= "string" or IsSecret(message) then return nil, nil end
+    local ok, action, payload = pcall(function()
+        if strsplit then
+            return strsplit(":", message)
+        end
+        return message:match("^([^:]+):(.+)$")
+    end)
+    if ok then
+        return action, payload
+    end
+    return nil, nil
 end
 
 local function ComputeFreshnessPenalty(itemId, source)
@@ -78,8 +104,14 @@ end
 
 -- Accepts "<itemId>" and the legacy "<itemId>_<timeBucket>" payload from older versions.
 local function ParseClaimItemId(payload)
-    if type(payload) ~= "string" then return nil end
-    return tonumber(payload:match("^(%d+)"))
+    if type(payload) ~= "string" or IsSecret(payload) then return nil end
+    local ok, res = pcall(function()
+        return tonumber(payload:match("^(%d+)"))
+    end)
+    if ok then
+        return res
+    end
+    return nil
 end
 
 function PCF.Consensus.Init()
@@ -91,6 +123,7 @@ function PCF.Consensus.Init()
     frame:RegisterEvent("CHAT_MSG_ADDON")
     frame:SetScript("OnEvent", function(_, _, prefix, message, channel, sender)
         if prefix ~= SYNC_PREFIX then return end
+        if message == nil or IsSecret(message) then return end
         local action, payload = ParseClaimMessage(message)
         if action == "CLAIM" then
             local claimedItemId = ParseClaimItemId(payload)

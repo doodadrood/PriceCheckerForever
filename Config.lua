@@ -3,6 +3,23 @@ PCF = (_G.PCF_INITIALIZED and _G.PCF) or (type(PCF) == "table" and PCF) or _G.PC
 _G.PCF = PCF
 _G.GPC = PCF
 
+function PCF.IsSecret(val)
+    if val == nil then return false end
+    if _G.issecretvalue then
+        local ok, isSec = pcall(_G.issecretvalue, val)
+        if ok and isSec then
+            return true
+        end
+    end
+    if _G.canaccessvalue then
+        local ok, canAccess = pcall(_G.canaccessvalue, val)
+        if ok and not canAccess then
+            return true
+        end
+    end
+    return false
+end
+
 PCF_DB = PCF_DB or _G.GPC_DB or {}
 _G.PCF_DB = PCF_DB
 _G.GPC_DB = PCF_DB

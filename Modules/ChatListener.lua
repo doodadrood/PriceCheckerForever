@@ -6,17 +6,53 @@ PCF.ChatListener = PCF.ChatListener or {}
 
 local cooldowns = {}
 
-local function IsSelfSender(sender)
-    if not sender then return false end
+local function IsSecret(val)
+    if val == nil then return false end
+    if PCF and PCF.IsSecret then
+        return PCF.IsSecret(val)
+    end
+    if _G.issecretvalue then
+        local ok, isSec = pcall(_G.issecretvalue, val)
+        if ok and isSec then
+            return true
+        end
+    end
+    if _G.canaccessvalue then
+        local ok, canAccess = pcall(_G.canaccessvalue, val)
+        if ok and not canAccess then
+            return true
+        end
+    end
+    return false
+end
+
+local function IsSelfSender(sender, guid)
+    if guid and not IsSecret(guid) then
+        local playerGUID = UnitGUID and UnitGUID("player")
+        if playerGUID and not IsSecret(playerGUID) and guid == playerGUID then
+            return true
+        end
+    end
+    if not sender or IsSecret(sender) then
+        return false
+    end
     local playerName = UnitName and UnitName("player")
-    if not playerName then return false end
-    if sender == playerName then return true end
-    local shortSender = sender:match("^([^%-]+)")
-    return shortSender == playerName
+    if not playerName or IsSecret(playerName) then
+        return false
+    end
+    local ok, isMatch = pcall(function()
+        if sender == playerName then return true end
+        local shortSender = sender:match("^([^%-]+)")
+        return shortSender == playerName
+    end)
+    return ok and isMatch == true
 end
 
 local function CheckCooldown(sender)
-    local key = sender or "_API_"
+    local key = sender
+    if key == nil or IsSecret(key) then
+        key = "_SECRET_"
+    end
     local now = GetTime()
     local cooldownSec = (PCF_DB and PCF_DB.settings and PCF_DB.settings.cooldownSeconds) or 3
     if cooldowns[key] and (now - cooldowns[key]) < cooldownSec then
@@ -61,6 +97,9 @@ function PCF.ChatListener.DispatchPriceReply(itemLink, itemId, channel, target, 
         if PCF_DB and PCF_DB.settings and PCF_DB.settings.allowWhispers == false then
             return false
         end
+        if not target or IsSecret(target) then
+            return false
+        end
         SendChatMessage(responseMsg, "WHISPER", nil, target)
         return true, responseMsg
     elseif upperChannel == "GUILD" then
@@ -87,15 +126,16 @@ function PCF.ChatListener.DispatchPriceReply(itemLink, itemId, channel, target, 
     return false
 end
 
-local function HandleIncoming(message, sender, channel)
+local function HandleIncoming(message, sender, channel, guid)
     if not PCF_DB or not PCF_DB.settings or not PCF_DB.settings.enabled then return end
-    if IsSelfSender(sender) then return end
+    if message == nil or IsSecret(message) then return end
+    if IsSelfSender(sender, guid) then return end
 
     -- Another player's visible price reply counts as a claim, so we stay quiet even if
     -- their addon-channel CLAIM message was missed or delayed.
     if channel == "GUILD" and type(message) == "string" then
-        local repliedItemId = message:match("^Price check for .-item:(%d+)")
-        if repliedItemId then
+        local ok, repliedItemId = pcall(string.match, message, "^Price check for .-item:(%d+)")
+        if ok and repliedItemId then
             if PCF.Consensus and PCF.Consensus.RegisterClaim then
                 PCF.Consensus.RegisterClaim(tonumber(repliedItemId))
             end
@@ -106,7 +146,8 @@ local function HandleIncoming(message, sender, channel)
     local itemLink, itemId, quantity = PCF.ItemParser.Parse(message)
     if not itemLink or not itemId then return end
 
-    PCF.ChatListener.DispatchPriceReply(itemLink, itemId, channel, sender, sender, quantity)
+    local safeCooldownKey = (sender and not IsSecret(sender)) and sender or (channel or "_SECRET_")
+    PCF.ChatListener.DispatchPriceReply(itemLink, itemId, channel, sender, safeCooldownKey, quantity)
 end
 
 function PCF.ChatListener.ResetCooldowns()
@@ -121,11 +162,11 @@ function PCF.ChatListener.Init()
     listenerFrame:RegisterEvent("CHAT_MSG_GUILD")
     listenerFrame:RegisterEvent("CHAT_MSG_WHISPER")
 
-    listenerFrame:SetScript("OnEvent", function(_, event, msg, sender)
+    listenerFrame:SetScript("OnEvent", function(self, event, msg, sender, languageName, channelName, playerName2, specialFlags, zoneChannelID, channelIndex, channelBaseName, unused, lineID, guid)
         if event == "CHAT_MSG_GUILD" then
-            HandleIncoming(msg, sender, "GUILD")
+            HandleIncoming(msg, sender, "GUILD", guid)
         elseif event == "CHAT_MSG_WHISPER" then
-            HandleIncoming(msg, sender, "WHISPER")
+            HandleIncoming(msg, sender, "WHISPER", guid)
         end
     end)
 

@@ -235,6 +235,30 @@ local lateReply = Mock.chatMessages[#Mock.chatMessages]
 Assert(#Mock.chatMessages == chatBeforeLate + 1 and lateReply.channel == "GUILD" and lateReply.msg:find("50s", 1, true) and lateReply.msg:find("PCF Mesh", 1, true), "Delayed guild reply uses peer data that arrived while waiting")
 PCF_DB.prices[77001] = nil
 
+-- Secret sender in dungeon/instance chat tests
+local secretChatSender = setmetatable({}, {
+    __eq = function()
+        error("attempt to compare local 'sender' (a secret string value, while execution tainted by 'PriceCheckerForever')")
+    end,
+    __index = function(_, k)
+        error("attempt to index local 'sender' (a secret string value, while execution tainted by 'PriceCheckerForever')")
+    end,
+    __tostring = function() return "SecretSender" end,
+})
+_G.issecretvalue = function(v) return v == secretChatSender end
+
+local okGuildSecret = pcall(function()
+    PCF.ChatListener.frame:Trigger("CHAT_MSG_GUILD", "? |cffff8000|Hitem:19019:0:0:0|h[Thunderfury]|h|r", secretChatSender)
+end)
+Assert(okGuildSecret == true, "Guild chat query with secret sender does not crash in dungeon")
+
+local okWhisperSecret = pcall(function()
+    PCF.ChatListener.frame:Trigger("CHAT_MSG_WHISPER", "? |cffff8000|Hitem:19019:0:0:0|h[Thunderfury]|h|r", secretChatSender)
+end)
+Assert(okWhisperSecret == true, "Whisper query with secret sender does not crash and safely drops")
+
+_G.issecretvalue = nil
+
 _G.TSM_API, _G.Auctionator = savedTSM, savedAuc
 
 -- 6. AH Scanner, UI Button, Progress Bar & TOC Loader Integration Test

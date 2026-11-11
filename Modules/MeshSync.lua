@@ -57,13 +57,36 @@ local function SendAddonMsg(prefix, message, channel)
     end
 end
 
+local function IsSecret(val)
+    if val == nil then return false end
+    if PCF and PCF.IsSecret then
+        return PCF.IsSecret(val)
+    end
+    if _G.issecretvalue then
+        local ok, isSec = pcall(_G.issecretvalue, val)
+        if ok and isSec then
+            return true
+        end
+    end
+    if _G.canaccessvalue then
+        local ok, canAccess = pcall(_G.canaccessvalue, val)
+        if ok and not canAccess then
+            return true
+        end
+    end
+    return false
+end
+
 local function IsSelfSender(sender)
-    if not sender then return false end
+    if not sender or IsSecret(sender) then return false end
     local playerName = UnitName and UnitName("player")
-    if not playerName then return false end
-    if sender == playerName then return true end
-    local shortSender = sender:match("^([^%-]+)")
-    return shortSender == playerName
+    if not playerName or IsSecret(playerName) then return false end
+    local ok, isMatch = pcall(function()
+        if sender == playerName then return true end
+        local shortSender = sender:match("^([^%-]+)")
+        return shortSender == playerName
+    end)
+    return ok and isMatch == true
 end
 
 local function DrainOutboundQueue()
@@ -236,7 +259,11 @@ function PCF.MeshSync.SniffExternalMessage(prefix, message, sender)
     if not PCF_DB or not PCF_DB.settings or PCF_DB.settings.enableSniffExternalAddons == false then
         return 0
     end
-    if type(message) ~= "string" or #message > 512 then
+    if message == nil or IsSecret(message) or type(message) ~= "string" then
+        return 0
+    end
+    local ok, len = pcall(function() return #message end)
+    if not ok or not len or len > 512 then
         return 0
     end
 
@@ -366,6 +393,7 @@ function PCF.MeshSync.ResetCooldowns()
 end
 
 local function HandleSyncMessage(prefix, message, channel, sender)
+    if message == nil or IsSecret(message) then return end
     if IsSelfSender(sender) then return end
 
     if EXTERNAL_PREFIXES[prefix] then

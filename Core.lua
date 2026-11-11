@@ -4,6 +4,9 @@ _G.PCF = PCF
 _G.GPC = PCF
 
 local function NormalizeItemInput(itemLinkOrId)
+    if not itemLinkOrId or (PCF.IsSecret and PCF.IsSecret(itemLinkOrId)) then
+        return nil, nil, nil
+    end
     if type(itemLinkOrId) == "number" then
         if itemLinkOrId > 0 then
             return nil, math.floor(itemLinkOrId), 1
