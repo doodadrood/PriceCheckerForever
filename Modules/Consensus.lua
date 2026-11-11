@@ -40,7 +40,7 @@ local function ParseClaimMessage(message)
 end
 
 local function ComputeFreshnessPenalty(itemId, source)
-    if source == "TSM DBMarket" or source == "Auctionator" then
+    if type(source) == "string" and (source:find("^TSM") or source:find("^Auctionator")) then
         return 0.00
     end
     if itemId and PCF_DB and PCF_DB.prices and PCF_DB.prices[itemId] then

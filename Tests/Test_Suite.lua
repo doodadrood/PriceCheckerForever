@@ -87,6 +87,51 @@ _G.TSM_API = {
 local tsmPrice, tsmSource = PCF.ProviderRegistry.ResolvePrice(link1, id1)
 Assert(tsmPrice == 900000 and tsmSource == "TSM DBMarket", "Resolve TSM DBMarket as highest priority provider")
 
+-- TSM timestamp tests
+-- A. TSM:GetLastScanTime(itemId) (e.g. 1 hour 15 minutes ago)
+_G.TSM = {
+    GetLastScanTime = function(self, itemId)
+        if itemId == id1 then
+            return time() - (75 * 60)
+        end
+    end
+}
+local tsmPriceWithTime, tsmSourceWithTime = PCF.ProviderRegistry.ResolvePrice(link1, id1)
+Assert(tsmPriceWithTime == 900000 and tsmSourceWithTime == "TSM DBMarket (1h 15m ago)", "Resolve TSM DBMarket with relative timestamp from TSM:GetLastScanTime (1h 15m ago)")
+
+-- B. TSM.db.realm.appDataUpdate (e.g. 35 minutes ago)
+_G.TSM = {
+    db = {
+        realm = {
+            appDataUpdate = time() - (35 * 60),
+        }
+    }
+}
+local _, tsmSourceApp = PCF.ProviderRegistry.ResolvePrice(link1, id1)
+Assert(tsmSourceApp == "TSM DBMarket (35m ago)", "Resolve TSM DBMarket with relative timestamp from appDataUpdate (35m ago)")
+
+-- C. TSM_API.GetPriceTimestamp (e.g. 2 hours ago)
+_G.TSM = nil
+_G.TSM_API.GetPriceTimestamp = function(source, target)
+    return time() - (120 * 60)
+end
+local _, tsmSourceApi = PCF.ProviderRegistry.ResolvePrice(link1, id1)
+Assert(tsmSourceApi == "TSM DBMarket (2h ago)", "Resolve TSM DBMarket with relative timestamp from TSM_API.GetPriceTimestamp (2h ago)")
+_G.TSM_API.GetPriceTimestamp = nil
+
+-- D. Chat price check message formatting with TSM timestamp
+_G.TSM = {
+    GetLastScanTime = function(self, itemId)
+        if itemId == id1 then
+            return time() - (75 * 60)
+        end
+    end
+}
+local _, chatReply = PCF.ChatListener.DispatchPriceReply(link1, id1, "WHISPER", "Friend", "Friend_TSM_Test", 1)
+Assert(chatReply:find("%[TSM DBMarket %(1h 15m ago%)%]") ~= nil, "Format chat response with TSM relative timestamp (1h 15m ago)")
+_G.TSM = nil
+Mock.chatMessages = {}
+
 -- 5. ChatListener & Consensus Protocol Tests
 PCF.Consensus.Init()
 PCF.ChatListener.Init()
