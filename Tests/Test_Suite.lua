@@ -682,4 +682,106 @@ local embeddedTable = {}
 coreChunk("ThiccUI", embeddedTable)
 Assert(embeddedTable.coreFrame == nil, "Core.lua aborts secondary ADDON_LOADED frame registration when _G.PCF_INITIALIZED is set")
 
+-- 13. Large Copper Prices & WoW 32-bit string.format Integer Overflow Protection
+do
+    local origFormat = string.format
+    local INT32_MIN, INT32_MAX = -2147483648, 2147483647
+    string.format = function(fmt, ...)
+        local args = { ... }
+        local argIdx = 0
+        local i = 1
+        while i <= #fmt do
+            if fmt:sub(i, i) == "%" then
+                if fmt:sub(i + 1, i + 1) == "%" then
+                    i = i + 2
+                else
+                    local specStart, specEnd, spec = fmt:find("^%%[-+ #0]*[%d%*]*%.?[%d%*]*([cdiouxXeEfFgGqs])", i)
+                    assert(specStart, "Unsupported format specifier: " .. fmt:sub(i))
+                    argIdx = argIdx + 1
+                    if spec == "d" or spec == "i" or spec == "u" or spec == "x" or spec == "X" or spec == "o" then
+                        local val = tonumber(args[argIdx])
+                        assert(val ~= nil, "bad argument to %" .. spec)
+                        if val ~= val or val < INT32_MIN or val > INT32_MAX then
+                            error("integer overflow attempting to store " .. tostring(val))
+                        end
+                    end
+                    i = specEnd + 1
+                end
+            else
+                i = i + 1
+            end
+        end
+        return origFormat(fmt, ...)
+    end
+
+    local okOverflowSuite, overflowErr = pcall(function()
+        local savedPrices = PCF_DB.prices
+        local savedLastSync = PCF_DB.lastPeerSync
+        local savedTime = Mock.currentTime
+
+        -- Exact reproducer: itemId 18401 at 9,999,999g 01s 00c (99999990100c > INT32_MAX)
+        Mock.currentTime = 1794501500
+        PCF_DB.prices = {
+            [18401] = { minBuyout = 99999990100, minBid = 99999990100, lastUpdated = 1794501499, count = 1, source = "Scan" },
+            [2589] = { minBuyout = 150, minBid = 150, lastUpdated = 1794501400, count = 10, source = "Scan" },
+        }
+        local largeChunks = tocAddonTable.MeshSync.BuildDeltaChunks(0)
+        Assert(#largeChunks == 1 and largeChunks[1]:find("18401:99999990100:1794501499", 1, true) ~= nil, "BuildDeltaChunks serializes >32-bit copper buyout without integer overflow")
+
+        PCF_DB.prices = {}
+        local appliedLarge = tocAddonTable.MeshSync.ApplyDeltaPayload("DELTA:18401:99999990100:1794501499|18402:100000000000:1794501499")
+        Assert(appliedLarge == 1 and PCF_DB.prices[18401] and PCF_DB.prices[18401].minBuyout == 99999990100 and PCF_DB.prices[18402] == nil, "ApplyDeltaPayload accepts 9,999,999g cap (<1e11c) and rejects >=1e11c")
+
+        -- Edge cases: NaN, inf, sub-copper, negative timestamp, oversized corrupted entry
+        PCF_DB.prices = {
+            [1] = { minBuyout = 0 / 0, lastUpdated = 100 },
+            [2] = { minBuyout = 1 / 0, lastUpdated = 100 },
+            [3] = { minBuyout = 0.5, lastUpdated = 100 },
+            [4] = { minBuyout = 100, lastUpdated = -5 },
+            [5] = { minBuyout = 100, lastUpdated = 1 / 0 },
+            [6] = { minBuyout = 1e260, lastUpdated = 100 },
+            [18401] = { minBuyout = 99999990100.9, lastUpdated = 1794501499.7 },
+        }
+        local filteredChunks = tocAddonTable.MeshSync.BuildDeltaChunks(0)
+        Assert(#filteredChunks == 1 and filteredChunks[1] == "DELTA:18401:99999990100:1794501499", "BuildDeltaChunks skips NaN, inf, sub-copper, negative timestamps, and >245B entries")
+
+        -- Post-2038 timestamp in RequestDigest
+        tocAddonTable.MeshSync.ResetCooldowns()
+        PCF_DB.lastPeerSync = 2500000000
+        local digestBefore = #Mock.addonMessages
+        tocAddonTable.MeshSync.RequestDigest(true)
+        Assert(#Mock.addonMessages == digestBefore + 1 and Mock.addonMessages[#Mock.addonMessages].msg == "REQ_DIGEST:2500000000", "RequestDigest formats timestamps > INT32_MAX without overflow")
+
+        -- SniffExternalMessage consistency with 9,999,999g cap
+        PCF_DB.prices = {}
+        local sniffLarge = tocAddonTable.MeshSync.SniffExternalMessage("TSM_SYNC", "18401:99999990100|18402:100000000000", "Peer")
+        Assert(sniffLarge == 1 and PCF_DB.prices[18401].minBuyout == 99999990100 and PCF_DB.prices[18402] == nil, "SniffExternalMessage accepts <1e11c and rejects >=1e11c")
+
+        -- Stack money formatting when gold itself exceeds INT32_MAX (99999990100 * 500 = 4999999505g)
+        Assert(PCF.Formatter.FormatMoney(99999990100 * 500) == "4999999505g", "FormatMoney formats stacks where gold exceeds INT32_MAX")
+        Assert(PCF.Formatter.FormatTooltipMoney(99999990100 * 500):find("4999999505", 1, true) ~= nil, "FormatTooltipMoney formats stacks where gold exceeds INT32_MAX")
+        Assert(PCF.Formatter.FormatMoney(0 / 0) == "0c" and PCF.Formatter.FormatTooltipMoney(1 / 0) == "??", "Formatters safely handle NaN and inf")
+
+        _G.GetCoinTextureString = function(copper)
+            return string.format("%dg", math.floor(copper / 10000))
+        end
+        Assert(PCF.Formatter.FormatTooltipMoney(99999990100 * 500):find("4999999505", 1, true) ~= nil, "FormatTooltipMoney falls back cleanly if GetCoinTextureString overflows")
+        _G.GetCoinTextureString = nil
+
+        -- Huge quantity parsing & large item ID in RequestPriceCheck
+        local _, parsedLargeId, parsedHugeQty = PCF.ItemParser.Parse("? " .. string.rep("9", 400) .. "x |cffffffff|Hitem:18401:0:0:0|h[Item]|h|r")
+        Assert(parsedLargeId == 18401 and parsedHugeQty == 1, "ItemParser clamps infinite stack multiplier to 1")
+        Assert(_G.PCF_API.RequestPriceCheck(99999999999, "WHISPER", "AskerLarge") == true, "RequestPriceCheck handles large numeric item ID without %d overflow")
+
+        PCF_DB.prices = savedPrices
+        PCF_DB.lastPeerSync = savedLastSync
+        Mock.currentTime = savedTime
+    end)
+
+    string.format = origFormat
+    if not okOverflowSuite then
+        error(overflowErr)
+    end
+end
+
 print("\n--- All Unit Tests Passed Successfully ---")

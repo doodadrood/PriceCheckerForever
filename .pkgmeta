@@ -2,6 +2,7 @@ package-as: PriceCheckerForever
 
 ignore:
   - Tests
+  - .agents
   - .antigravity
   - .git
   - .github

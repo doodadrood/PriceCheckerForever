@@ -78,10 +78,10 @@ function PCF.ItemParser.Parse(msg)
             local trailingQtyStr = tail:match("^%]?%s*[xX%*]%s*(%d+)")
                 or tail:match("^%]?%s*(%d+)%s*[xX%*]")
             local quantity = tonumber(trailingQtyStr) or tonumber(leadingQtyStr) or 1
-            if quantity < 1 then
+            if not (quantity >= 1) or quantity >= math.huge then
                 quantity = 1
             else
-                quantity = math.floor(quantity)
+                quantity = math.floor(quantity) + 0
             end
             return itemLink, tonumber(itemId), quantity
         end

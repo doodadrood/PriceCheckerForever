@@ -15,6 +15,7 @@ local EXTERNAL_PREFIXES = {
 
 local MAX_ADDON_MSG_BYTES = 245 -- Below Blizzard's 255-byte SendAddonMessage ceiling
 local MAX_ITEMS_PER_CHUNK = 15
+local MAX_SYNC_BUYOUT_COPPER = 100000000000 -- 10,000,000g (above WoW's 9,999,999g 99s 99c cap)
 local DIGEST_COOLDOWN_SEC = 1800 -- 30 minutes minimum between REQ_DIGEST broadcasts
 local HEARTBEAT_INTERVAL_SEC = 600 -- 10 minutes between dirty-item gossip broadcasts
 local SEND_PACE_SEC = 0.20 -- 5 messages/sec max outbound drain rate
@@ -163,11 +164,32 @@ function PCF.MeshSync.RefreshExternalAddonPrices()
     return updated
 end
 
+local function NormalizePositiveInt(val)
+    if type(val) ~= "number" or not (val > 0 and val < math.huge) then
+        return nil
+    end
+    local floored = math.floor(val)
+    if not (floored > 0) then
+        return nil
+    end
+    return floored + 0
+end
+
+local function NormalizeNonNegativeInt(val)
+    if type(val) ~= "number" or not (val >= 0 and val < math.huge) then
+        return nil
+    end
+    return math.floor(val) + 0
+end
+
 -- Packs price records into compact "DELTA:<itemId>:<buyout>:<timestamp>|..." chunks
 -- strictly respecting the 255-character SendAddonMessage limit.
 function PCF.MeshSync.BuildDeltaChunks(sinceTimestamp, itemFilter)
     if not PCF_DB or not PCF_DB.prices then return {} end
     sinceTimestamp = tonumber(sinceTimestamp) or 0
+    if sinceTimestamp ~= sinceTimestamp then
+        sinceTimestamp = 0
+    end
 
     local chunks = {}
     local currentPrefix = "DELTA:"
@@ -176,26 +198,30 @@ function PCF.MeshSync.BuildDeltaChunks(sinceTimestamp, itemFilter)
     local countInChunk = 0
 
     for itemId, data in pairs(PCF_DB.prices) do
-        if (not itemFilter or itemFilter[itemId])
-            and type(itemId) == "number"
-            and data
-            and data.minBuyout and data.minBuyout > 0
-            and (data.lastUpdated or 0) > sinceTimestamp
-        then
-            local entryStr = string.format("%d:%d:%d", itemId, math.floor(data.minBuyout), math.floor(data.lastUpdated or 0))
-            local separatorLen = countInChunk > 0 and 1 or 0
-            local projectedLen = currentLen + separatorLen + #entryStr
+        if (not itemFilter or itemFilter[itemId]) and type(data) == "table" then
+            local safeItemId = NormalizePositiveInt(itemId)
+            local safeBuyout = NormalizePositiveInt(data.minBuyout)
+            local safeUpdated = NormalizeNonNegativeInt(data.lastUpdated or 0)
 
-            if countInChunk > 0 and (projectedLen > MAX_ADDON_MSG_BYTES or countInChunk >= MAX_ITEMS_PER_CHUNK) then
-                table.insert(chunks, currentPrefix .. table.concat(currentParts, "|"))
-                currentParts = {}
-                currentLen = #currentPrefix
-                countInChunk = 0
+            if safeItemId and safeBuyout and safeUpdated and safeUpdated > sinceTimestamp then
+                -- Use %.0f instead of %d: WoW Lua's %d overflows signed 32-bit int (>214,748g 36s 47c)
+                local entryStr = string.format("%.0f:%.0f:%.0f", safeItemId, safeBuyout, safeUpdated)
+                if (#currentPrefix + #entryStr) <= MAX_ADDON_MSG_BYTES then
+                    local separatorLen = countInChunk > 0 and 1 or 0
+                    local projectedLen = currentLen + separatorLen + #entryStr
+
+                    if countInChunk > 0 and (projectedLen > MAX_ADDON_MSG_BYTES or countInChunk >= MAX_ITEMS_PER_CHUNK) then
+                        table.insert(chunks, currentPrefix .. table.concat(currentParts, "|"))
+                        currentParts = {}
+                        currentLen = #currentPrefix
+                        countInChunk = 0
+                    end
+
+                    table.insert(currentParts, entryStr)
+                    currentLen = currentLen + (countInChunk > 0 and 1 or 0) + #entryStr
+                    countInChunk = countInChunk + 1
+                end
             end
-
-            table.insert(currentParts, entryStr)
-            currentLen = currentLen + (countInChunk > 0 and 1 or 0) + #entryStr
-            countInChunk = countInChunk + 1
         end
     end
 
@@ -223,7 +249,7 @@ function PCF.MeshSync.ApplyDeltaPayload(payload)
         local buyout = tonumber(buyoutStr)
         local ts = tonumber(tsStr)
 
-        if itemId and itemId > 0 and buyout and buyout > 0 and buyout < 10000000000 and ts and ts > 0 then
+        if itemId and itemId > 0 and itemId < math.huge and buyout and buyout > 0 and buyout < MAX_SYNC_BUYOUT_COPPER and ts and ts > 0 and ts < math.huge then
             -- Clamp peer timestamp against future clock skew
             local safeTs = math.min(ts, now)
             local existing = PCF_DB.prices[itemId]
@@ -274,7 +300,7 @@ function PCF.MeshSync.SniffExternalMessage(prefix, message, sender)
     for itemIdStr, buyoutStr in message:gmatch("(%d+):(%d+)") do
         local itemId = tonumber(itemIdStr)
         local buyout = tonumber(buyoutStr)
-        if itemId and itemId > 0 and itemId < 500000 and buyout and buyout > 0 and buyout < 10000000000 then
+        if itemId and itemId > 0 and itemId < 500000 and buyout and buyout > 0 and buyout < MAX_SYNC_BUYOUT_COPPER then
             local existing = PCF_DB.prices[itemId]
             if not existing or now >= (existing.lastUpdated or 0) then
                 if existing then
@@ -342,8 +368,8 @@ function PCF.MeshSync.RequestDigest(force)
     end
 
     lastDigestRequestTime = now
-    local sinceTs = (PCF_DB and PCF_DB.lastPeerSync) or 0
-    SendAddonMsg(SYNC_PREFIX, string.format("REQ_DIGEST:%d", sinceTs), "GUILD")
+    local sinceTs = NormalizeNonNegativeInt(tonumber(PCF_DB and PCF_DB.lastPeerSync) or 0) or 0
+    SendAddonMsg(SYNC_PREFIX, string.format("REQ_DIGEST:%.0f", sinceTs), "GUILD")
     return true
 end
 
@@ -352,8 +378,8 @@ function PCF.MeshSync.RequestItem(itemId)
     if not PCF_DB or not PCF_DB.settings or PCF_DB.settings.enablePeerSync == false then
         return false
     end
-    itemId = tonumber(itemId)
-    if not itemId or itemId <= 0 then
+    itemId = NormalizePositiveInt(tonumber(itemId))
+    if not itemId then
         return false
     end
 
@@ -371,7 +397,7 @@ function PCF.MeshSync.RequestItem(itemId)
         if seenAt and (GetTime() - seenAt) < ITEM_REQUEST_SUPPRESS_SEC then
             return -- a peer already asked; their DELTA reply serves us too
         end
-        SendAddonMsg(SYNC_PREFIX, "REQ_ITEM:" .. itemId, "GUILD")
+        SendAddonMsg(SYNC_PREFIX, string.format("REQ_ITEM:%.0f", itemId), "GUILD")
     end)
     return true
 end
@@ -433,7 +459,8 @@ local function HandleSyncMessage(prefix, message, channel, sender)
 
     local reqItemStr = message:match("^REQ_ITEM:(%d+)$")
     if reqItemStr then
-        local reqItemId = tonumber(reqItemStr)
+        local reqItemId = NormalizePositiveInt(tonumber(reqItemStr))
+        if not reqItemId then return end
         local now = GetTime()
         itemRequestSeen[reqItemId] = now
 

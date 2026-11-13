@@ -85,9 +85,11 @@ function PCF.ChatListener.DispatchPriceReply(itemLink, itemId, channel, target, 
         return false
     end
 
-    quantity = tonumber(quantity) and math.floor(tonumber(quantity)) or 1
-    if quantity < 1 then
+    local parsedQty = tonumber(quantity)
+    if not parsedQty or not (parsedQty >= 1) or parsedQty >= math.huge then
         quantity = 1
+    else
+        quantity = math.floor(parsedQty) + 0
     end
 
     local responseMsg, price, source = BuildPriceResponse(itemLink, itemId, quantity)
