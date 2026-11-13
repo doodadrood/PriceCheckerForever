@@ -4,6 +4,7 @@ ignore:
   - Tests
   - .agents
   - .antigravity
+  - AGENTS.md
   - .git
   - .github
   - .gitignore
