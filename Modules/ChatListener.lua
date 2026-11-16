@@ -63,20 +63,45 @@ local function CheckCooldown(sender)
 end
 
 local function BuildPriceResponse(itemLink, itemId, quantity)
-    local price, source = PCF.ProviderRegistry.ResolvePrice(itemLink, itemId)
-    local formatted
-    if price and price > 0 then
+    local ahPrice, ahSource = PCF.ProviderRegistry.ResolveAHPrice(itemLink, itemId)
+    local vendorPrice = PCF.ProviderRegistry.GetVendorPrice and PCF.ProviderRegistry.GetVendorPrice(itemLink, itemId)
+
+    local ahFormatted
+    if ahPrice and ahPrice > 0 then
         if quantity > 1 then
-            local stackFormatted = PCF.Formatter.FormatMoney(price * quantity)
-            local unitFormatted = PCF.Formatter.FormatMoney(price)
-            formatted = string.format("%s (%s ea)", stackFormatted, unitFormatted)
+            local stackFormatted = PCF.Formatter.FormatMoney(ahPrice * quantity)
+            local unitFormatted = PCF.Formatter.FormatMoney(ahPrice)
+            ahFormatted = string.format("%s (%s ea)", stackFormatted, unitFormatted)
         else
-            formatted = PCF.Formatter.FormatMoney(price)
+            ahFormatted = PCF.Formatter.FormatMoney(ahPrice)
         end
     else
-        formatted = "No price data"
+        ahFormatted = "No AH data"
     end
-    return string.format("Price check for %s: %s [%s]", itemLink, formatted, source), price, source
+
+    local vendorFormatted
+    if vendorPrice and vendorPrice > 0 then
+        if quantity > 1 then
+            local vendorStack = PCF.Formatter.FormatMoney(vendorPrice * quantity)
+            local vendorUnit = PCF.Formatter.FormatMoney(vendorPrice)
+            vendorFormatted = string.format("{Vendor: %s / %s ea}", vendorStack, vendorUnit)
+        else
+            vendorFormatted = string.format("{Vendor: %s}", PCF.Formatter.FormatMoney(vendorPrice))
+        end
+    else
+        vendorFormatted = "{Vendor: N/A}"
+    end
+
+    local responseMsg
+    if ahPrice and ahPrice > 0 and ahSource then
+        responseMsg = string.format("Price check for %s: %s %s [%s]", itemLink, ahFormatted, vendorFormatted, ahSource)
+    else
+        responseMsg = string.format("Price check for %s: %s %s", itemLink, ahFormatted, vendorFormatted)
+    end
+
+    local effectivePrice = (ahPrice and ahPrice > 0 and ahPrice) or vendorPrice
+    local effectiveSource = (ahPrice and ahPrice > 0 and ahSource) or ((vendorPrice and vendorPrice > 0) and "Vendor Base" or "No Data")
+    return responseMsg, effectivePrice, effectiveSource
 end
 
 function PCF.ChatListener.DispatchPriceReply(itemLink, itemId, channel, target, cooldownKey, quantity)

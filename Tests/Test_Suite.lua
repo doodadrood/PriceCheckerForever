@@ -173,18 +173,57 @@ PCF_DB.prices[2450] = { minBuyout = 95, minBid = 90, lastUpdated = math.floor(Mo
 Mock.currentTime = 1100.0
 PCF.ChatListener.frame:Trigger("CHAT_MSG_WHISPER", "?|cffffffff|Hitem:2450:0:0:0|h[Briarthorn]|h|rx10", "GuildMate")
 Assert(
-    Mock.chatMessages[#Mock.chatMessages].msg == "Price check for |cffffffff|Hitem:2450:0:0:0|h[Briarthorn]|h|r: 9s 50c (95c ea) [Native AH Scan (0m ago)]",
-    "Format stack and unit price in chat response for ?[item]x10"
+    Mock.chatMessages[#Mock.chatMessages].msg == "Price check for |cffffffff|Hitem:2450:0:0:0|h[Briarthorn]|h|r: 9s 50c (95c ea) {Vendor: N/A} [Native AH Scan (0m ago)]",
+    "Format stack and unit price in chat response for ?[item]x10 (unsellable / N/A vendor)"
 )
 -- Advance time by 14 minutes (840s) and verify chat reply says (14m ago) matching AH banner
 Mock.currentTime = 1080.0 + (14 * 60)
 PCF.ChatListener.frame:Trigger("CHAT_MSG_WHISPER", "?|cffffffff|Hitem:2450:0:0:0|h[Briarthorn]|h|r*5", "GuildMate")
 Assert(
-    Mock.chatMessages[#Mock.chatMessages].msg == "Price check for |cffffffff|Hitem:2450:0:0:0|h[Briarthorn]|h|r: 4s 75c (95c ea) [Native AH Scan (14m ago)]",
+    Mock.chatMessages[#Mock.chatMessages].msg == "Price check for |cffffffff|Hitem:2450:0:0:0|h[Briarthorn]|h|r: 4s 75c (95c ea) {Vendor: N/A} [Native AH Scan (14m ago)]",
     "Format stack and unit price with exact minute age (14m ago) for ?[item]*5"
 )
 PCF_DB.prices[2450] = nil
 PCF_DB.lastFullScan = 0
+
+-- Vendor price formatting in chat response (single item, stack, and No AH data fallback)
+local origGetItemInfo = _G.GetItemInfo
+_G.GetItemInfo = function(itemId)
+    if itemId == 8831 then
+        -- Purple Lotus: vendor sell 3s (300c)
+        return "Purple Lotus", nil, 1, 45, 0, "Trade Goods", "Herb", 20, "", 1, 300
+    end
+    return origGetItemInfo(itemId)
+end
+local purpleLotusLink = "|cffffffff|Hitem:8831:0:0:0|h[Purple Lotus]|h|r"
+PCF_DB.prices[8831] = { minBuyout = 605, minBid = 600, lastUpdated = math.floor(Mock.currentTime) - (52 * 60), count = 20, source = "PCF Sniff" }
+local _, lotusStackReply = PCF.ChatListener.DispatchPriceReply(purpleLotusLink, 8831, "WHISPER", "GuildMate", "Lotus_Stack_Test", 20)
+Assert(
+    lotusStackReply == "Price check for |cffffffff|Hitem:8831:0:0:0|h[Purple Lotus]|h|r: 1g 21s (6s 5c ea) {Vendor: 60s / 3s ea} [PCF Sniff (52m ago)]",
+    "Format stack AH price and stack/unit vendor price in squiggly brackets"
+)
+local _, lotusSingleReply = PCF.ChatListener.DispatchPriceReply(purpleLotusLink, 8831, "WHISPER", "GuildMate", "Lotus_Single_Test", 1)
+Assert(
+    lotusSingleReply == "Price check for |cffffffff|Hitem:8831:0:0:0|h[Purple Lotus]|h|r: 6s 5c {Vendor: 3s} [PCF Sniff (52m ago)]",
+    "Format single-item AH price and unit vendor price in squiggly brackets"
+)
+PCF_DB.prices[8831] = nil
+local _, lotusNoAHStackReply = PCF.ChatListener.DispatchPriceReply(purpleLotusLink, 8831, "WHISPER", "GuildMate", "Lotus_NoAH_Stack_Test", 20)
+Assert(
+    lotusNoAHStackReply == "Price check for |cffffffff|Hitem:8831:0:0:0|h[Purple Lotus]|h|r: No AH data {Vendor: 60s / 3s ea}",
+    "Format No AH data with stack/unit vendor price when no AH price exists"
+)
+local _, lotusNoAHSingleReply = PCF.ChatListener.DispatchPriceReply(purpleLotusLink, 8831, "WHISPER", "GuildMate", "Lotus_NoAH_Single_Test", 1)
+Assert(
+    lotusNoAHSingleReply == "Price check for |cffffffff|Hitem:8831:0:0:0|h[Purple Lotus]|h|r: No AH data {Vendor: 3s}",
+    "Format No AH data with unit vendor price when no AH price exists"
+)
+local _, noAHNoVendorReply = PCF.ChatListener.DispatchPriceReply("|cffffffff|Hitem:2450:0:0:0|h[Briarthorn]|h|r", 2450, "WHISPER", "GuildMate", "Briar_NoAH_NoVendor_Test", 1)
+Assert(
+    noAHNoVendorReply == "Price check for |cffffffff|Hitem:2450:0:0:0|h[Briarthorn]|h|r: No AH data {Vendor: N/A}",
+    "Format No AH data with {Vendor: N/A} when neither AH nor vendor price exists"
+)
+_G.GetItemInfo = origGetItemInfo
 
 -- Guild consensus: claims are keyed by item only (GetTime() differs on every machine, so no clock in the key)
 Mock.currentTime = 2000.0

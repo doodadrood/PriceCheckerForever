@@ -89,6 +89,8 @@ local function GetVendorPrice(itemLink, itemId)
     return nil
 end
 
+PCF.ProviderRegistry.GetVendorPrice = GetVendorPrice
+
 function PCF.ProviderRegistry.ResolveAHPrice(itemLink, itemId)
     local preferred = PCF_DB and PCF_DB.settings and PCF_DB.settings.preferredProvider
     local preferredName = preferred and PREFERRED_MAP[preferred:upper()]
