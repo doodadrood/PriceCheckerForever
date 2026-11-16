@@ -6,9 +6,9 @@ PCF.Consensus = {}
 
 local SYNC_PREFIX = "PCF_SYNC"
 local SIX_HOURS_SECONDS = 6 * 3600
-local CLAIM_WINDOW_SECONDS = 60 -- how long a claim on an item suppresses other responders
-local VENDOR_ONLY_DELAY = 2.0   -- vendor-price-only nodes yield to nodes holding real AH data
-local NO_DATA_DELAY = 3.0       -- nodes with nothing yield to everyone; they only answer if nobody else did
+local PRE_CLAIM_GRACE_SECONDS = 0.5 -- suppress if a peer's reply arrived at the same moment as the query event
+local VENDOR_ONLY_DELAY = 2.0       -- vendor-price-only nodes yield to nodes holding real AH data
+local NO_DATA_DELAY = 3.0           -- nodes with nothing yield to everyone; they only answer if nobody else did
 
 -- [itemId] = GetTime() (local clock) at which a claim was made or seen.
 -- Claims are keyed by itemId only: GetTime() differs on every machine, so it must never
@@ -90,15 +90,15 @@ local function ComputeResponseDelay(itemId, source)
     return ComputeFreshnessPenalty(itemId, source) + (math.random(50, 1000) / 1000)
 end
 
-local function IsClaimed(itemId)
+local function IsClaimedForQuery(itemId, queryTime)
     local claimedAt = activeClaims[itemId]
     if not claimedAt then
         return false
     end
-    if (GetTime() - claimedAt) < CLAIM_WINDOW_SECONDS then
+    -- Claimed while our backoff timer was waiting, or within the grace window right before the query
+    if claimedAt >= (queryTime - PRE_CLAIM_GRACE_SECONDS) then
         return true
     end
-    activeClaims[itemId] = nil
     return false
 end
 
@@ -148,15 +148,16 @@ function PCF.Consensus.RegisterClaim(itemId)
 end
 
 function PCF.Consensus.DispatchGuildResponse(itemId, dispatchCallback, source)
-    if IsClaimed(itemId) then
-        return -- Already claimed by another node
+    local queryTime = GetTime()
+    if IsClaimedForQuery(itemId, queryTime) then
+        return -- Already claimed by another node for this query
     end
 
     local delay = ComputeResponseDelay(itemId, source)
 
     C_Timer.After(delay, function()
-        if not IsClaimed(itemId) then
-            -- Broadcast claim to suppress other guild members
+        if not IsClaimedForQuery(itemId, queryTime) then
+            -- Broadcast claim to suppress other guild members waiting on this query
             activeClaims[itemId] = GetTime()
             SendAddonMsg(SYNC_PREFIX, "CLAIM:" .. itemId, "GUILD")
             dispatchCallback()

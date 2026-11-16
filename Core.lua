@@ -27,8 +27,8 @@ local function NormalizeItemInput(itemLinkOrId)
                 local _, endIdx = itemLinkOrId:find(cleanLink, 1, true)
                 if endIdx then
                     local tail = itemLinkOrId:sub(endIdx + 1)
-                    local qtyStr = tail:match("^%]?%s*[xX%*]%s*(%d+)")
-                        or tail:match("^%]?%s*(%d+)%s*[xX%*]")
+                    local qtyStr = tail:match("^%s*%]?%s*[xX%*]%s*(%d+)")
+                        or tail:match("^%s*%]?%s*(%d+)%s*[xX%*]")
                     if qtyStr then
                         local q = tonumber(qtyStr)
                         if q and q >= 1 and q < math.huge then

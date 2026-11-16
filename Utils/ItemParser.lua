@@ -25,19 +25,35 @@ local function IsSecret(val)
 end
 
 -- Matches standard WoW item links (hex color or modern named color)
-local ITEM_LINK_HEX_PATTERN = "^%[?(|c%x+|Hitem:%d+.-|h%[.-%]|h|r)"
-local ITEM_LINK_NAMED_PATTERN = "^%[?(|cn[^:]+:|Hitem:%d+.-|h%[.-%]|h|r)"
-local ITEM_LINK_RAW_PATTERN = "^%[?(|Hitem:%d+.-|h%[.-%]|h)"
+local ITEM_LINK_HEX_PATTERN = "^%[?%s*(|c%x+|Hitem:%d+.-|h%[.-%]|h|r)"
+local ITEM_LINK_NAMED_PATTERN = "^%[?%s*(|cn[^:]+:|Hitem:%d+.-|h%[.-%]|h|r)"
+local ITEM_LINK_RAW_PATTERN = "^%[?%s*(|Hitem:%d+.-|h%[.-%]|h)"
+
+local function NormalizeWhitespace(str)
+    -- Convert non-breaking spaces (UTF-8 C2 A0), thin/zero-width spaces (E2 80 80..8B, E2 80 AF),
+    -- ideographic space (E3 80 80), and UTF-8 BOM (EF BB BF) into standard ASCII spaces
+    str = str:gsub("\194\160", " ")
+    str = str:gsub("\226\128[\128-\139\175]", " ")
+    str = str:gsub("\227\128\128", " ")
+    str = str:gsub("\239\187\191", "")
+    return str
+end
 
 local function ExtractLeadingTriggerRest(msg)
     local ok, rest = pcall(function()
-        local r = msg:match("^%s*%?%s*(.+)$")
+        local normalized = NormalizeWhitespace(msg)
+        local trimmed = normalized:match("^%s*(.-)%s*$")
+        if not trimmed or trimmed == "" then
+            return nil
+        end
+
+        local r = trimmed:match("^%?+%s*:?%s*(.+)$")
         if r then
             return r
         end
 
-        r = msg:match("^%s*[pP][cC]%s*(.+)$")
-        if r and (r:find("^%[?|") or msg:find("^%s*[pP][cC]%s+")) then
+        r = trimmed:match("^[pP][cC]%s*:?%s*(.+)$")
+        if r and (r:find("^%[?%s*|") or trimmed:find("^[pP][cC][%s:]")) then
             return r
         end
 
@@ -75,8 +91,8 @@ function PCF.ItemParser.Parse(msg)
         local itemId = itemLink:match("item:(%d+)")
         if itemId then
             local tail = rest:sub((e or #itemLink) + 1)
-            local trailingQtyStr = tail:match("^%]?%s*[xX%*]%s*(%d+)")
-                or tail:match("^%]?%s*(%d+)%s*[xX%*]")
+            local trailingQtyStr = tail:match("^%s*%]?%s*[xX%*]%s*(%d+)")
+                or tail:match("^%s*%]?%s*(%d+)%s*[xX%*]")
             local quantity = tonumber(trailingQtyStr) or tonumber(leadingQtyStr) or 1
             if not (quantity >= 1) or quantity >= math.huge then
                 quantity = 1

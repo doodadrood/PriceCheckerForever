@@ -41,6 +41,26 @@ Assert(idX == 2450 and qtyX == 10 and linkX == "|cffffffff|Hitem:2450:0:0:0|h[Br
 local linkStar, idStar, qtyStar = PCF.ItemParser.Parse("? |cffffffff|Hitem:2450:0:0:0|h[Briarthorn]|h|r * 20")
 Assert(idStar == 2450 and qtyStar == 20 and linkStar == "|cffffffff|Hitem:2450:0:0:0|h[Briarthorn]|h|r", "Parse ?[item] * 20 stack multiplier")
 
+-- Leading space & internal space variations for both ? and pc
+local heavyLeatherLink = "|cffffffff|Hitem:4234:0:0:0|h[Heavy Leather]|h|r"
+local lLeadQ, idLeadQ, qtyLeadQ = PCF.ItemParser.Parse(" ?|cffffffff|Hitem:4234:0:0:0|h[Heavy Leather]|h|rx20")
+Assert(idLeadQ == 4234 and qtyLeadQ == 20 and lLeadQ == heavyLeatherLink, "Parse leading space before ?[item]x20")
+
+local lNbspQ, idNbspQ, qtyNbspQ = PCF.ItemParser.Parse("\194\160 ?\194\160|cffffffff|Hitem:4234:0:0:0|h[Heavy Leather]|h|r\194\160x\194\16020")
+Assert(idNbspQ == 4234 and qtyNbspQ == 20 and lNbspQ == heavyLeatherLink, "Parse UTF-8 non-breaking spaces in ? [item] x 20")
+
+local lIntQ, idIntQ, qtyIntQ = PCF.ItemParser.Parse("  ?   |cffffffff|Hitem:4234:0:0:0|h[Heavy Leather]|h|r   x   20  ")
+Assert(idIntQ == 4234 and qtyIntQ == 20 and lIntQ == heavyLeatherLink, "Parse leading, internal, and trailing spaces in ? [item] x 20")
+
+local lLeadPC, idLeadPC, qtyLeadPC = PCF.ItemParser.Parse(" pc|cffffffff|Hitem:4234:0:0:0|h[Heavy Leather]|h|rx20")
+Assert(idLeadPC == 4234 and qtyLeadPC == 20 and lLeadPC == heavyLeatherLink, "Parse leading space before pc[item]x20")
+
+local lIntPC, idIntPC, qtyIntPC = PCF.ItemParser.Parse("   pc   |cffffffff|Hitem:4234:0:0:0|h[Heavy Leather]|h|r   x   20   ")
+Assert(idIntPC == 4234 and qtyIntPC == 20 and lIntPC == heavyLeatherLink, "Parse leading and internal spaces in pc [item] x 20")
+
+local lLeadQtyPC, idLeadQtyPC, qtyLeadQtyPC = PCF.ItemParser.Parse(" pc 20 x |cffffffff|Hitem:4234:0:0:0|h[Heavy Leather]|h|r")
+Assert(idLeadQtyPC == 4234 and qtyLeadQtyPC == 20 and lLeadQtyPC == heavyLeatherLink, "Parse leading and internal spaces in pc 20 x [item]")
+
 local link3, id3 = PCF.ItemParser.Parse("what is the price of this item?")
 Assert(id3 == nil, "Reject input without trigger or item link")
 
@@ -240,6 +260,25 @@ local timersBeforeVisible = #Mock.timers
 PCF.ChatListener.frame:Trigger("CHAT_MSG_GUILD", "Price check for |cffff8000|Hitem:19019:0:0:0|h[Thunderfury]|h|r: 50g 00s 00c [Native AH Scan (1h ago)]", "OtherNode")
 PCF.ChatListener.frame:Trigger("CHAT_MSG_GUILD", "? |cffff8000|Hitem:19019:0:0:0|h[Thunderfury]|h|r", "GuildMate")
 Assert(#Mock.timers == timersBeforeVisible, "Stay silent when another player's price reply was already seen in guild chat")
+
+-- Follow-up guild queries for the same item after the 3s sender cooldown (including leading & internal spaces) still get answered
+PCF_DB.prices[4234] = { minBuyout = 250, minBid = 200, lastUpdated = math.floor(Mock.currentTime), count = 20, source = "PCF Sniff" }
+Mock.currentTime = 2110.0
+local chatBeforeFollowUp = #Mock.chatMessages
+PCF.ChatListener.frame:Trigger("CHAT_MSG_GUILD", "?|cffffffff|Hitem:4234:0:0:0|h[Heavy Leather]|h|rx20", "Ferris Zeusler")
+Mock.timers[#Mock.timers].callback()
+Assert(#Mock.chatMessages == chatBeforeFollowUp + 1, "First guild query ?[Heavy Leather]x20 responds")
+
+Mock.currentTime = 2115.0 -- 5s later (> 3s sender cooldown, previously blocked by 60s claim window)
+PCF.ChatListener.frame:Trigger("CHAT_MSG_GUILD", " ?|cffffffff|Hitem:4234:0:0:0|h[Heavy Leather]|h|rx20", "Ferris Zeusler")
+Mock.timers[#Mock.timers].callback()
+Assert(#Mock.chatMessages == chatBeforeFollowUp + 2, "Second guild query with leading space ' ?[Heavy Leather]x20' responds after 3s cooldown")
+
+Mock.currentTime = 2120.0 -- another 5s later with internal spaces
+PCF.ChatListener.frame:Trigger("CHAT_MSG_GUILD", "? |cffffffff|Hitem:4234:0:0:0|h[Heavy Leather]|h|r x 20", "Ferris Zeusler")
+Mock.timers[#Mock.timers].callback()
+Assert(#Mock.chatMessages == chatBeforeFollowUp + 3, "Third guild query with internal spaces '? [Heavy Leather] x 20' responds")
+PCF_DB.prices[4234] = nil
 
 -- Players with no data wait their turn (>= 3s) and ask peers for just that item
 Mock.currentTime = 2200.0
