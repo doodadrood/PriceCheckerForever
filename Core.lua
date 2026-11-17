@@ -168,6 +168,17 @@ local function RegisterSlashCommands()
         elseif cmd == "sync" then
             PCF_DB.settings.enablePeerSync = not PCF_DB.settings.enablePeerSync
             print(string.format("|cff00ff00[PCF]|r Peer Mesh Sync: %s", PCF_DB.settings.enablePeerSync and "ON" or "OFF"))
+        elseif cmd == "default" or cmd == "defaults" or cmd == "reset" then
+            if PCF.ResetSettings then
+                PCF.ResetSettings()
+            end
+            if PCF.Scanner and PCF.Scanner.UpdateVisibility then
+                PCF.Scanner.UpdateVisibility()
+            end
+            if PCF.Tooltip and PCF.Tooltip.RefreshVisibleTooltip then
+                PCF.Tooltip.RefreshVisibleTooltip()
+            end
+            print("|cff00ff00[PCF]|r Settings reset to defaults (AH Scan Button: ON, Tooltip: ON, Auto-Scan: ON, Provider: AUTO).")
         else
             print("|cff00ff00PriceCheckerForever Commands:|r")
             print("  /pcf scan      - Perform full AH scan (must have AH window open)")
@@ -178,6 +189,7 @@ local function RegisterSlashCommands()
             print("  /pcf tooltip   - Toggle item tooltip AH price display on or off")
             print("  /pcf sniff     - Toggle passive AH browse-sniffing on or off")
             print("  /pcf sync      - Toggle guild peer-to-peer mesh sync on or off")
+            print("  /pcf default   - Reset all PCF settings to baseline defaults")
         end
     end
 end

@@ -1026,7 +1026,7 @@ do
     Assert(dirtyTracker[71002] == nil, "Do not call MarkDirty for stale (> 6h old) external provider entries")
     tocAddonTable.MeshSync.MarkDirty = origMarkDirty
 
-    -- (5) Preserve user /pcf button and /pcf tooltip overrides across reloads (PCF.LoadConfig)
+    -- (5) Preserve user /pcf button and /pcf tooltip overrides across reloads (PCF.LoadConfig) & /pcf default reset
     PCF_DB.settings.showScanButton = false
     PCF_DB.settings.showTooltip = false
     PCF_DB.settings.userSetScanButton = false
@@ -1037,6 +1037,45 @@ do
     Assert(PCF_DB.settings.showTooltip == true and PCF_DB.settings.userSetTooltip == true, "/pcf tooltip sets userSetTooltip = true")
     PCF.LoadConfig(PCF_DB) -- Simulate /reload while _G.Auctionator is present
     Assert(PCF_DB.settings.showScanButton == true and PCF_DB.settings.showTooltip == true, "PCF.LoadConfig preserves user-enabled showScanButton and showTooltip across reloads when external addon is installed")
+
+    -- Auto-restore when previously installed external addon is removed and user had not manually overridden
+    PCF_DB.settings.showScanButton = false
+    PCF_DB.settings.showTooltip = false
+    PCF_DB.settings.userSetScanButton = false
+    PCF_DB.settings.userSetTooltip = false
+    local tempAuc = _G.Auctionator
+    local tempTSM = _G.TSM_API
+    _G.Auctionator = nil
+    _G.TSM_API = nil
+    PCF.LoadConfig(PCF_DB)
+    Assert(PCF_DB.settings.showScanButton == true and PCF_DB.settings.showTooltip == true, "PCF.LoadConfig restores showScanButton and showTooltip when previously installed external addon is removed")
+
+    -- /pcf default (and /pcf reset) resets customized settings back to baseline defaults
+    PCF_DB.settings.enabled = false
+    PCF_DB.settings.showScanButton = false
+    PCF_DB.settings.showTooltip = false
+    PCF_DB.settings.userSetScanButton = true
+    PCF_DB.settings.userSetTooltip = true
+    PCF_DB.settings.preferredProvider = "TSM"
+    PCF_DB.settings.autoScanOnOpen = false
+    PCF_DB.settings.preferReplicateScan = true
+    tocAddonTable.Scanner.UpdateVisibility()
+    Assert(tocAddonTable.Scanner.scanButton.shown == false, "Scan button hidden before /pcf default")
+    SlashCmdList["PRICECHECKERFOREVER"]("default")
+    Assert(
+        PCF_DB.settings.enabled == true
+            and PCF_DB.settings.showScanButton == true
+            and PCF_DB.settings.showTooltip == true
+            and PCF_DB.settings.userSetScanButton == false
+            and PCF_DB.settings.userSetTooltip == false
+            and PCF_DB.settings.preferredProvider == "AUTO"
+            and PCF_DB.settings.autoScanOnOpen == true
+            and PCF_DB.settings.preferReplicateScan == false
+            and tocAddonTable.Scanner.scanButton.shown == true,
+        "/pcf default resets all PCF settings to baseline defaults and restores AH scan button"
+    )
+    _G.Auctionator = tempAuc
+    _G.TSM_API = tempTSM
 
     -- (6) Optional cooldown-gated auto-scan on AUCTION_HOUSE_SHOW (/pcf autoscan)
     Assert(PCF_DB.settings.autoScanOnOpen == true and PCF_DB.settings.autoScanCooldownSeconds == 900, "Default config enables autoScanOnOpen with 900s (15m) cooldown")

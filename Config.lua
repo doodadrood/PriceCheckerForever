@@ -95,7 +95,26 @@ function PCF.LoadConfig(customDB)
         if not PCF_DB.settings.userSetTooltip then
             PCF_DB.settings.showTooltip = false
         end
+    else
+        if not PCF_DB.settings.userSetScanButton then
+            PCF_DB.settings.showScanButton = true
+        end
+        if not PCF_DB.settings.userSetTooltip then
+            PCF_DB.settings.showTooltip = true
+        end
     end
 
     return PCF_DB
+end
+
+function PCF.ResetSettings()
+    PCF_DB = (type(_G.PCF_DB) == "table" and _G.PCF_DB)
+        or (type(_G.GPC_DB) == "table" and _G.GPC_DB)
+        or PCF_DB
+        or {}
+    _G.PCF_DB = PCF_DB
+    _G.GPC_DB = PCF_DB
+    PCF_DB.settings = {}
+    ApplyDefaults(PCF_DB, defaultConfig)
+    return PCF_DB.settings
 end
