@@ -406,17 +406,22 @@ Assert(tocAddonTable.Scanner.scanButton:GetText() == "PCF Scan", "Button resets 
 Assert(tocAddonTable.Scanner.progressText:GetText():find("100%% Done") ~= nil, "Progress text shows 100% Done on completion")
 Assert(PCF_DB.prices[12360] and PCF_DB.prices[12360].minBuyout == 145000, "Scanner computes unit buyout (290000 / 2 = 145000c)")
 
--- Modern C_AuctionHouse scan test within 15-minute ReplicateItems cooldown (uses SendBrowseQuery fallback)
+-- Modern C_AuctionHouse scan test: uses SendBrowseQuery as primary fast path with empty sorts = {}
 local savedQueryAuctionItems = _G.QueryAuctionItems
 _G.QueryAuctionItems = nil
 local browseQueryCalled = false
+local capturedBrowseQuery = nil
+local replicateCalledDuringPrimary = false
 local browseResultsData = {
     { itemKey = { itemID = 13468 }, minPrice = 42000, totalQuantity = 12 },
 }
 _G.C_AuctionHouse = {
-    ReplicateItems = function() end,
-    SendBrowseQuery = function()
+    ReplicateItems = function()
+        replicateCalledDuringPrimary = true
+    end,
+    SendBrowseQuery = function(q)
         browseQueryCalled = true
+        capturedBrowseQuery = q
     end,
     GetBrowseResults = function()
         return browseResultsData
@@ -425,15 +430,18 @@ _G.C_AuctionHouse = {
         return true
     end,
 }
-Mock.currentTime = Mock.currentTime + 540 -- 9 minutes after previous scan
-PCF_DB.lastReplicateScan = time() - 540 -- a real ReplicateItems scan ran 9 minutes ago (< 15m server cooldown)
+Mock.currentTime = Mock.currentTime + 540
+PCF_DB.lastReplicateScan = 0 -- Even when ReplicateItems is off cooldown, SendBrowseQuery is primary
 tocAddonTable.Scanner.scanButton:Click()
-Assert(browseQueryCalled == true, "Use C_AuctionHouse.SendBrowseQuery when ReplicateItems is within 15-minute cooldown")
+Assert(browseQueryCalled == true and replicateCalledDuringPrimary == false, "Use C_AuctionHouse.SendBrowseQuery as primary modern scan path without calling ReplicateItems")
+Assert(type(capturedBrowseQuery) == "table" and type(capturedBrowseQuery.sorts) == "table" and #capturedBrowseQuery.sorts == 0, "Pass empty sorts = {} in StartModernBrowseScan")
 tocAddonTable.Scanner.frame:Trigger("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
 Assert(tocAddonTable.Scanner.scanButton:GetText() == "PCF Scan", "Browse-all scan completes cleanly without hanging")
 Assert(PCF_DB.prices[13468] and PCF_DB.prices[13468].minBuyout == 42000, "Browse-all scan records item minPrice accurately")
 
--- Replicate-first API scan: waits for REPLICATE_ITEM_LIST_UPDATE and only falls back to browse after the timeout
+-- Replicate-first API scan (/pcf replicate mode): waits for REPLICATE_ITEM_LIST_UPDATE and only falls back to browse after the timeout
+SlashCmdList["PRICECHECKERFOREVER"]("replicate")
+Assert(PCF_DB.settings.preferReplicateScan == true, "/pcf replicate enables preferReplicateScan mode")
 local replicateCalls, replicateBrowseCalls = 0, 0
 local replicateData = {}
 _G.C_AuctionHouse = {
@@ -500,6 +508,8 @@ scanner.scanButton:Click()
 Assert(replicateCalls == callsAfterRequest and replicateBrowseCalls == browseBeforeRetry + 1, "Retry after a timed-out replicate goes straight to browse")
 scanner.frame:Trigger("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
 Assert(scanner.scanButton:GetText() == "PCF Scan", "Browse retry completes cleanly")
+SlashCmdList["PRICECHECKERFOREVER"]("replicate")
+Assert(PCF_DB.settings.preferReplicateScan == false, "/pcf replicate toggles preferReplicateScan back OFF")
 _G.C_AuctionHouse = nil
 _G.QueryAuctionItems = savedQueryAuctionItems
 
@@ -860,6 +870,223 @@ do
     if not okOverflowSuite then
         error(overflowErr)
     end
+end
+
+-- 14. AH Scanning, Provider & Configuration Optimizations (1-6)
+do
+    local savedQuery = _G.QueryAuctionItems
+    local savedCAH = _G.C_AuctionHouse
+    local savedCItem = _G.C_Item
+    local savedAuc = _G.Auctionator
+    local savedAucVars = _G.AUCTIONATOR_SAVEDVARS
+    local savedAucDB = _G.AUCTIONATOR_PRICE_DATABASE
+    local savedListings = Mock.auctionListings
+    local savedTime14 = Mock.currentTime
+    Mock.currentTime = 1794501500
+    Mock.auctionListings = {}
+    _G.QueryAuctionItems = nil
+
+    -- Ensure scan button is enabled for scanner tests
+    PCF_DB.settings.showScanButton = true
+    PCF_DB.settings.userSetScanButton = true
+    tocAddonTable.Scanner.UpdateVisibility()
+
+    -- (2a) Direct delta processing on AUCTION_HOUSE_BROWSE_RESULTS_ADDED during full scan
+    local getBrowseResultsCalls = 0
+    local requestMoreCalls = 0
+    local hasFullBrowse = false
+    local page1Browse = {
+        { itemKey = { itemID = 50001 }, minPrice = 1100, totalQuantity = 7 },
+    }
+    local page2Delta = {
+        { itemKey = { itemID = 50002 }, minPrice = 2200, totalQuantity = 19 },
+    }
+    _G.C_AuctionHouse = {
+        SendBrowseQuery = function() end,
+        GetBrowseResults = function()
+            getBrowseResultsCalls = getBrowseResultsCalls + 1
+            return page1Browse
+        end,
+        HasFullBrowseResults = function()
+            return hasFullBrowse
+        end,
+        RequestMoreBrowseResults = function()
+            requestMoreCalls = requestMoreCalls + 1
+        end,
+    }
+    local timersBeforeDeltaScan = #Mock.timers
+    tocAddonTable.Scanner.StartScan()
+    tocAddonTable.Scanner.frame:Trigger("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
+    Assert(getBrowseResultsCalls == 1 and PCF_DB.prices[50001] and PCF_DB.prices[50001].minBuyout == 1100 and PCF_DB.prices[50001].count == 7, "Initial AUCTION_HOUSE_BROWSE_RESULTS_UPDATED fetches page 1 via GetBrowseResults")
+
+    local moreTimer = FindTimerByDelay(0.02, timersBeforeDeltaScan + 1)
+    Assert(moreTimer ~= nil, "Schedule RequestMoreBrowseResults with fast 0.02s delay")
+    moreTimer.callback()
+    Assert(requestMoreCalls == 1, "RequestMoreBrowseResults invoked for next browse batch")
+
+    hasFullBrowse = true
+    tocAddonTable.Scanner.frame:Trigger("AUCTION_HOUSE_BROWSE_RESULTS_ADDED", page2Delta)
+    Assert(getBrowseResultsCalls == 1, "AUCTION_HOUSE_BROWSE_RESULTS_ADDED processes addedResults delta directly without calling GetBrowseResults()")
+    Assert(PCF_DB.prices[50002] and PCF_DB.prices[50002].minBuyout == 2200 and PCF_DB.prices[50002].count == 19, "AUCTION_HOUSE_BROWSE_RESULTS_ADDED records delta items and totalQuantity")
+
+    -- (2b) Passive sniffing with addedResults delta & uncapped (>500) GetBrowseResults
+    local sniffGetBrowseCalls = 0
+    local largeBrowseResults = {}
+    for i = 1, 650 do
+        largeBrowseResults[i] = { itemKey = { itemID = 60000 + i }, minPrice = 500 + i, totalQuantity = 3 }
+    end
+    _G.C_AuctionHouse = {
+        GetBrowseResults = function()
+            sniffGetBrowseCalls = sniffGetBrowseCalls + 1
+            return largeBrowseResults
+        end,
+    }
+    tocAddonTable.Scanner.frame:Trigger("AUCTION_HOUSE_BROWSE_RESULTS_ADDED", {
+        { itemKey = { itemID = 59999 }, minPrice = 8888, totalQuantity = 4 },
+    })
+    Assert(sniffGetBrowseCalls == 0 and PCF_DB.prices[59999] and PCF_DB.prices[59999].minBuyout == 8888, "Passive SniffVisiblePage(addedResults) processes delta without calling GetBrowseResults()")
+
+    tocAddonTable.Scanner.frame:Trigger("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
+    Assert(sniffGetBrowseCalls == 1 and PCF_DB.prices[60650] and PCF_DB.prices[60650].minBuyout == 1150, "Passive SniffVisiblePage() captures browse results past index 500 (index 650)")
+
+    -- (3) In-memory batch aggregation & ghost-item filtering in ProcessModernReplicate
+    local markDirtyCalls = {}
+    local origMarkDirty = tocAddonTable.MeshSync.MarkDirty
+    tocAddonTable.MeshSync.MarkDirty = function(itemId)
+        markDirtyCalls[itemId] = (markDirtyCalls[itemId] or 0) + 1
+        return origMarkDirty(itemId)
+    end
+    _G.C_Item = {
+        DoesItemExistByID = function(itemId)
+            return itemId ~= 99999 -- 99999 is a ghost item
+        end,
+    }
+    local repRows = {
+        { itemId = 99999, count = 1, minBid = 100, buyoutPrice = 200 }, -- ghost item (filtered out)
+        { itemId = 70001, count = 5, minBid = 450, buyoutPrice = 500 }, -- 100c unit buyout, 90c unit bid
+        { itemId = 70001, count = 10, minBid = 800, buyoutPrice = 850 }, -- 85c unit buyout, 80c unit bid
+        { itemId = 70001, count = 20, minBid = 1900, buyoutPrice = 2000 }, -- 100c unit buyout, 95c unit bid
+    }
+    _G.C_AuctionHouse = {
+        ReplicateItems = function() end,
+        GetNumReplicateItems = function() return #repRows end,
+        GetReplicateItemInfo = function(index)
+            local r = repRows[index + 1]
+            return nil, nil, r.count, 1, nil, 1, nil, r.minBid, 0, r.buyoutPrice, 0, nil, 0, nil, nil, 0, r.itemId
+        end,
+    }
+    PCF_DB.lastReplicateScan = 0
+    tocAddonTable.Scanner.StartScan(true) -- force replicate mode
+    tocAddonTable.Scanner.frame:Trigger("REPLICATE_ITEM_LIST_UPDATE")
+    Assert(PCF_DB.prices[99999] == nil and markDirtyCalls[99999] == nil, "Filter out ghost items where C_Item.DoesItemExistByID returns false")
+    Assert(PCF_DB.prices[70001] and PCF_DB.prices[70001].minBuyout == 85 and PCF_DB.prices[70001].minBid == 80 and PCF_DB.prices[70001].count == 35, "Aggregate minBuyout, minBid, and total count across replicate stacks in memory")
+    Assert(markDirtyCalls[70001] == 1, "Call MeshSync.MarkDirty only once per unique itemId at end of replicate scan")
+    tocAddonTable.MeshSync.MarkDirty = origMarkDirty
+    _G.C_Item = savedCItem
+
+    -- (4) AuctionatorProvider accurate scan timestamp, age label, quantity harvesting & fresh-only MarkDirty
+    local nowTs = time()
+    local dirtyTracker = {}
+    tocAddonTable.MeshSync.MarkDirty = function(itemId)
+        dirtyTracker[itemId] = (dirtyTracker[itemId] or 0) + 1
+        return origMarkDirty(itemId)
+    end
+    _G.AUCTIONATOR_PRICE_DATABASE = {
+        ["Forever_Alliance"] = {
+            ["71001"] = { m = 12345, a = { [100] = 4, [105] = 27 } },
+            ["71002"] = { m = 54321, a = { [102] = 9 } },
+        },
+    }
+    _G.Auctionator = {
+        SavedState = {
+            TimeOfLastBrowseScan = nowTs - (25 * 60), -- 25m ago
+            TimeOfLastReplicateScan = nowTs - (120 * 60),
+        },
+        API = {
+            v1 = {
+                GetAuctionPriceByItemLink = function(_, link)
+                    if link and link:find("item:71001") then return 12345 end
+                    if link and link:find("item:71002") then return 54321 end
+                end,
+                GetAuctionAgeByItemLink = function(_, link)
+                    if link and link:find("item:71001") then return 0 end -- seen in latest scan (25m ago)
+                    if link and link:find("item:71002") then return 3 end -- 3 days old (> 6h)
+                end,
+            },
+        },
+    }
+    local pFresh, srcFresh = tocAddonTable.ProviderRegistry.ResolvePrice("|cffffffff|Hitem:71001:0:0:0|h[FreshItem]|h|r", 71001)
+    Assert(pFresh == 12345 and srcFresh == "Auctionator (25m ago)", "Format Auctionator source label with relative age from TimeOfLastBrowseScan (25m ago)")
+    Assert(PCF_DB.prices[71001] and PCF_DB.prices[71001].count == 27 and PCF_DB.prices[71001].lastUpdated == nowTs - (25 * 60), "Harvest available quantity (count = 27) and exact scan timestamp from Auctionator")
+    Assert(dirtyTracker[71001] == 1, "MarkDirty called when external provider timestamp is known and fresh (< 6h)")
+
+    local pStale, srcStale = tocAddonTable.ProviderRegistry.ResolvePrice("|cffffffff|Hitem:71002:0:0:0|h[StaleItem]|h|r", 71002)
+    Assert(pStale == 54321 and srcStale == "Auctionator (72h ago)", "Adjust Auctionator timestamp by GetAuctionAgeByItemLink when ageDays > 0 (72h ago)")
+    Assert(PCF_DB.prices[71002] and PCF_DB.prices[71002].count == 9 and PCF_DB.prices[71002].lastUpdated == nowTs - (3 * 86400), "Store real 3-day-old timestamp instead of stamping now()")
+    Assert(dirtyTracker[71002] == nil, "Do not call MarkDirty for stale (> 6h old) external provider entries")
+    tocAddonTable.MeshSync.MarkDirty = origMarkDirty
+
+    -- (5) Preserve user /pcf button and /pcf tooltip overrides across reloads (PCF.LoadConfig)
+    PCF_DB.settings.showScanButton = false
+    PCF_DB.settings.showTooltip = false
+    PCF_DB.settings.userSetScanButton = false
+    PCF_DB.settings.userSetTooltip = false
+    SlashCmdList["PRICECHECKERFOREVER"]("button")
+    SlashCmdList["PRICECHECKERFOREVER"]("tooltip")
+    Assert(PCF_DB.settings.showScanButton == true and PCF_DB.settings.userSetScanButton == true, "/pcf button sets userSetScanButton = true")
+    Assert(PCF_DB.settings.showTooltip == true and PCF_DB.settings.userSetTooltip == true, "/pcf tooltip sets userSetTooltip = true")
+    PCF.LoadConfig(PCF_DB) -- Simulate /reload while _G.Auctionator is present
+    Assert(PCF_DB.settings.showScanButton == true and PCF_DB.settings.showTooltip == true, "PCF.LoadConfig preserves user-enabled showScanButton and showTooltip across reloads when external addon is installed")
+
+    -- (6) Optional cooldown-gated auto-scan on AUCTION_HOUSE_SHOW (/pcf autoscan)
+    Assert(PCF_DB.settings.autoScanOnOpen == true and PCF_DB.settings.autoScanCooldownSeconds == 900, "Default config enables autoScanOnOpen with 900s (15m) cooldown")
+    SlashCmdList["PRICECHECKERFOREVER"]("autoscan")
+    Assert(PCF_DB.settings.autoScanOnOpen == false, "/pcf autoscan toggles autoScanOnOpen OFF")
+    SlashCmdList["PRICECHECKERFOREVER"]("autoscan")
+    Assert(PCF_DB.settings.autoScanOnOpen == true, "/pcf autoscan toggles autoScanOnOpen back ON")
+
+    local autoScanStarted = 0
+    _G.C_AuctionHouse = {
+        SendBrowseQuery = function()
+            autoScanStarted = autoScanStarted + 1
+        end,
+        GetBrowseResults = function() return {} end,
+        HasFullBrowseResults = function() return true end,
+    }
+    _G.AuctionFrame:Show()
+
+    -- A. Within 15-minute cooldown: does not auto-scan
+    PCF_DB.lastFullScan = time() - 300 -- 5 minutes ago (< 900s)
+    local timersBeforeAutoCooldown = #Mock.timers
+    tocAddonTable.Scanner.frame:Trigger("AUCTION_HOUSE_SHOW")
+    Assert(FindTimerByDelay(0.5, timersBeforeAutoCooldown + 1) == nil, "Suppress auto-scan on AUCTION_HOUSE_SHOW when lastFullScan is within 15m cooldown")
+
+    -- B. Cooldown elapsed (>= 900s), but AH closes before 0.5s timer fires: does not start scan
+    PCF_DB.lastFullScan = time() - 1200 -- 20 minutes ago (>= 900s)
+    local timersBeforeAutoClose = #Mock.timers
+    tocAddonTable.Scanner.frame:Trigger("AUCTION_HOUSE_SHOW")
+    local autoTimerClosed = FindTimerByDelay(0.5, timersBeforeAutoClose + 1)
+    Assert(autoTimerClosed ~= nil, "Schedule 0.5s auto-scan timer on AUCTION_HOUSE_SHOW when cooldown has elapsed")
+    tocAddonTable.Scanner.frame:Trigger("AUCTION_HOUSE_CLOSED")
+    autoTimerClosed.callback()
+    Assert(autoScanStarted == 0, "Abort scheduled auto-scan if AUCTION_HOUSE_CLOSED fires before 0.5s delay")
+
+    -- C. Cooldown elapsed and AH remains open: starts scan after 0.5s delay
+    local timersBeforeAutoOpen = #Mock.timers
+    tocAddonTable.Scanner.frame:Trigger("AUCTION_HOUSE_SHOW")
+    local autoTimerOpen = FindTimerByDelay(0.5, timersBeforeAutoOpen + 1)
+    Assert(autoTimerOpen ~= nil, "Schedule 0.5s auto-scan timer when AH opens")
+    autoTimerOpen.callback()
+    Assert(autoScanStarted == 1, "Auto-scan triggers PCF.Scanner.StartScan() after 0.5s when AH remains open")
+    tocAddonTable.Scanner.frame:Trigger("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
+
+    _G.QueryAuctionItems = savedQuery
+    _G.C_AuctionHouse = savedCAH
+    _G.Auctionator = savedAuc
+    _G.AUCTIONATOR_SAVEDVARS = savedAucVars
+    _G.AUCTIONATOR_PRICE_DATABASE = savedAucDB
+    Mock.auctionListings = savedListings
+    Mock.currentTime = savedTime14
 end
 
 print("\n--- All Unit Tests Passed Successfully ---")

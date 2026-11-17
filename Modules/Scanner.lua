@@ -26,6 +26,7 @@ local scanStartTime = 0
 local seenInScan = {}
 local seenInSniff = {}
 local sniffBatchId = 0
+local ahOpen = false
 
 -- UI Elements attached to AuctionFrame / AuctionHouseFrame
 local uiCreated = false
@@ -352,9 +353,9 @@ local function RecordItemAuction(itemId, count, minBid, buyoutPrice, now, source
     end
 end
 
--- Passively sniffs up to 50 visible items on the current AH page in a single pass
+-- Passively sniffs visible items on the current AH page in a single pass
 -- without triggering server queries or pagination calls.
-function PCF.Scanner.SniffVisiblePage()
+function PCF.Scanner.SniffVisiblePage(addedResults)
     if isScanning or not IsPassiveSniffingEnabled() then
         return 0
     end
@@ -363,9 +364,10 @@ function PCF.Scanner.SniffVisiblePage()
     sniffBatchId = sniffBatchId + 1
     local currentBatchId = sniffBatchId
     local sniffedItems = 0
+    local hasAddedDelta = type(addedResults) == "table" and #addedResults > 0
 
     -- 1. Legacy AH list sniffing (GetNumAuctionItems / GetAuctionItemInfo)
-    if GetNumAuctionItems and GetAuctionItemInfo then
+    if not hasAddedDelta and GetNumAuctionItems and GetAuctionItemInfo then
         local numBatchAuctions = GetNumAuctionItems("list") or 0
         if numBatchAuctions > 0 then
             local limit = math.min(numBatchAuctions, 50)
@@ -393,24 +395,30 @@ function PCF.Scanner.SniffVisiblePage()
     end
 
     -- 2. Modern C_AuctionHouse browse results sniffing (if available)
-    if C_AuctionHouse and C_AuctionHouse.GetBrowseResults then
+    local browseRows = nil
+    if hasAddedDelta then
+        browseRows = addedResults
+    elseif C_AuctionHouse and C_AuctionHouse.GetBrowseResults then
         local ok, results = pcall(C_AuctionHouse.GetBrowseResults)
         if ok and type(results) == "table" then
-            local limit = math.min(#results, 500)
-            for i = 1, limit do
-                local row = results[i]
-                local itemId = row and row.itemKey and row.itemKey.itemID
-                local minPrice = row and row.minPrice
-                local totalQty = (row and row.totalQuantity and row.totalQuantity > 0) and row.totalQuantity or 1
-                if itemId and minPrice and minPrice > 0 then
-                    local wasSeen = (seenInSniff[itemId] == currentBatchId)
-                    RecordItemAuction(itemId, 1, minPrice, minPrice, now, "PCF Sniff", seenInSniff, currentBatchId)
-                    if PCF_DB and PCF_DB.prices and PCF_DB.prices[itemId] then
-                        PCF_DB.prices[itemId].count = totalQty
-                    end
-                    if not wasSeen and seenInSniff[itemId] == currentBatchId then
-                        sniffedItems = sniffedItems + 1
-                    end
+            browseRows = results
+        end
+    end
+
+    if browseRows then
+        for i = 1, #browseRows do
+            local row = browseRows[i]
+            local itemId = row and row.itemKey and row.itemKey.itemID
+            local minPrice = row and row.minPrice
+            local totalQty = (row and row.totalQuantity and row.totalQuantity > 0) and row.totalQuantity or 1
+            if itemId and minPrice and minPrice > 0 then
+                local wasSeen = (seenInSniff[itemId] == currentBatchId)
+                RecordItemAuction(itemId, 1, minPrice, minPrice, now, "PCF Sniff", seenInSniff, currentBatchId)
+                if PCF_DB and PCF_DB.prices and PCF_DB.prices[itemId] then
+                    PCF_DB.prices[itemId].count = totalQty
+                end
+                if not wasSeen and seenInSniff[itemId] == currentBatchId then
+                    sniffedItems = sniffedItems + 1
                 end
             end
         end
@@ -765,13 +773,11 @@ local function StartModernBrowseScan()
     -- pending, so late API data can take over from this page-by-page fallback.
     UpdateScanUI("SCANNING", "Querying AH items...")
 
-    local sortOrder = (Enum and Enum.AuctionHouseSortOrder and Enum.AuctionHouseSortOrder.Price) or 0
     local query = {
         searchString = "",
-        sorts = {
-            { sortOrder = sortOrder, reverseSort = false },
-        },
+        sorts = {},
         filters = {},
+        itemClassFilters = {},
     }
     local ok = pcall(C_AuctionHouse.SendBrowseQuery, query)
     if not ok then
@@ -789,26 +795,8 @@ local function ProcessModernBrowseBatch(addedResults)
 
     local now = time()
     local prevProcessed = browseProcessedCount
-    local ok, results = false, nil
-    if C_AuctionHouse and C_AuctionHouse.GetBrowseResults then
-        ok, results = pcall(C_AuctionHouse.GetBrowseResults)
-    end
 
-    if ok and type(results) == "table" and #results > browseProcessedCount then
-        for i = browseProcessedCount + 1, #results do
-            local row = results[i]
-            local itemId = row and row.itemKey and row.itemKey.itemID
-            local minPrice = row and row.minPrice
-            local totalQty = (row and row.totalQuantity and row.totalQuantity > 0) and row.totalQuantity or 1
-            if itemId and itemId > 0 and minPrice and minPrice > 0 then
-                RecordItemAuction(itemId, 1, minPrice, minPrice, now, "Scan", seenInScan, true)
-                if PCF_DB and PCF_DB.prices and PCF_DB.prices[itemId] then
-                    PCF_DB.prices[itemId].count = totalQty
-                end
-            end
-        end
-        browseProcessedCount = #results
-    elseif type(addedResults) == "table" and #addedResults > 0 then
+    if type(addedResults) == "table" and #addedResults > 0 then
         for i = 1, #addedResults do
             local row = addedResults[i]
             local itemId = row and row.itemKey and row.itemKey.itemID
@@ -822,6 +810,23 @@ local function ProcessModernBrowseBatch(addedResults)
             end
         end
         browseProcessedCount = browseProcessedCount + #addedResults
+    elseif C_AuctionHouse and C_AuctionHouse.GetBrowseResults then
+        local ok, results = pcall(C_AuctionHouse.GetBrowseResults)
+        if ok and type(results) == "table" and #results > browseProcessedCount then
+            for i = browseProcessedCount + 1, #results do
+                local row = results[i]
+                local itemId = row and row.itemKey and row.itemKey.itemID
+                local minPrice = row and row.minPrice
+                local totalQty = (row and row.totalQuantity and row.totalQuantity > 0) and row.totalQuantity or 1
+                if itemId and itemId > 0 and minPrice and minPrice > 0 then
+                    RecordItemAuction(itemId, 1, minPrice, minPrice, now, "Scan", seenInScan, true)
+                    if PCF_DB and PCF_DB.prices and PCF_DB.prices[itemId] then
+                        PCF_DB.prices[itemId].count = totalQty
+                    end
+                end
+            end
+            browseProcessedCount = #results
+        end
     end
 
     local hasFull = true
@@ -843,7 +848,7 @@ local function ProcessModernBrowseBatch(addedResults)
         if not timerPending then
             timerPending = true
             local myToken = activeScanToken
-            C_Timer.After(0.10, function()
+            C_Timer.After(0.02, function()
                 timerPending = false
                 if not isScanning or not isBrowseScanning or activeScanToken ~= myToken then
                     return
@@ -912,16 +917,47 @@ local function ProcessModernReplicate()
     totalPages = math.max(1, math.ceil(numItems / batchSize))
     scanPage = 0
 
-    local now = time()
     local index = 0
     local myToken = activeScanToken
+    local scanAccumulator = {}
 
     local function ProcessBatch()
         if not isScanning or activeScanToken ~= myToken then return end
         local limit = math.min(index + batchSize - 1, numItems - 1)
         for i = index, limit do
             local _, _, count, _, _, _, _, minBid, _, buyoutPrice, _, _, _, _, _, _, itemId = C_AuctionHouse.GetReplicateItemInfo(i)
-            RecordItemAuction(itemId, count, minBid, buyoutPrice, now, "Scan", seenInScan, true)
+            if itemId and itemId > 0 and buyoutPrice and buyoutPrice > 0 and count and count > 0 then
+                local itemExists = true
+                if C_Item and type(C_Item.DoesItemExistByID) == "function" then
+                    local okExist, exists = pcall(C_Item.DoesItemExistByID, itemId)
+                    if okExist and not exists then
+                        itemExists = false
+                    end
+                end
+                if itemExists then
+                    local unitBuyout = math.floor(buyoutPrice / count)
+                    if unitBuyout > 0 then
+                        local unitBid = (minBid and minBid > 0) and math.floor(minBid / count) or unitBuyout
+                        local acc = scanAccumulator[itemId]
+                        if not acc then
+                            uniqueItemsScanned = uniqueItemsScanned + 1
+                            scanAccumulator[itemId] = {
+                                minBuyout = unitBuyout,
+                                minBid = unitBid,
+                                count = count,
+                            }
+                        else
+                            acc.count = acc.count + count
+                            if unitBuyout < acc.minBuyout then
+                                acc.minBuyout = unitBuyout
+                            end
+                            if unitBid < acc.minBid then
+                                acc.minBid = unitBid
+                            end
+                        end
+                    end
+                end
+            end
         end
         index = limit + 1
         scanPage = scanPage + 1
@@ -931,6 +967,30 @@ local function ProcessModernReplicate()
         if index < numItems then
             C_Timer.After(0.02, ProcessBatch)
         else
+            local commitNow = time()
+            PCF_DB = PCF_DB or {}
+            PCF_DB.prices = PCF_DB.prices or {}
+            for itemId, acc in pairs(scanAccumulator) do
+                local existing = PCF_DB.prices[itemId]
+                if existing then
+                    existing.minBuyout = acc.minBuyout
+                    existing.minBid = acc.minBid
+                    existing.lastUpdated = commitNow
+                    existing.count = acc.count
+                    existing.source = "Scan"
+                else
+                    PCF_DB.prices[itemId] = {
+                        minBuyout = acc.minBuyout,
+                        minBid = acc.minBid,
+                        lastUpdated = commitNow,
+                        count = acc.count,
+                        source = "Scan",
+                    }
+                end
+                if PCF.MeshSync and PCF.MeshSync.MarkDirty then
+                    PCF.MeshSync.MarkDirty(itemId)
+                end
+            end
             FinishScan()
         end
     end
@@ -963,7 +1023,7 @@ function PCF.Scanner.StopScan(reason)
     print("|cffff0000[PCF]|r " .. (reason or "Scan aborted."))
 end
 
-function PCF.Scanner.StartScan()
+function PCF.Scanner.StartScan(forceReplicate)
     if not IsScanButtonEnabled() then
         print("|cffff0000[PCF]|r AH scanning is disabled. Use /pcf button to enable.")
         return
@@ -978,6 +1038,15 @@ function PCF.Scanner.StartScan()
 
     -- Modern C_AuctionHouse path if legacy QueryAuctionItems is unavailable
     if not QueryAuctionItems and C_AuctionHouse then
+        local preferReplicate = (forceReplicate == true)
+            or (PCF_DB and PCF_DB.settings and PCF_DB.settings.preferReplicateScan == true)
+
+        if not preferReplicate and C_AuctionHouse.SendBrowseQuery then
+            print("|cff00ff00[PCF]|r Starting full AH scan...")
+            StartModernBrowseScan()
+            return
+        end
+
         local nowTs = time()
         local lastReplicate = (PCF_DB and PCF_DB.lastReplicateScan) or 0
         local cooldownOver = lastReplicate <= 0
@@ -1082,9 +1151,28 @@ function PCF.Scanner.Init()
 
     scanFrame:SetScript("OnEvent", function(_, event, arg1)
         if event == "AUCTION_HOUSE_SHOW" then
+            ahOpen = true
             CreateAuctionHouseUI()
             InstallSellFrameHooks()
+            if PCF_DB and PCF_DB.settings and PCF_DB.settings.autoScanOnOpen ~= false and IsScanButtonEnabled() and not isScanning then
+                local cooldown = tonumber(PCF_DB.settings.autoScanCooldownSeconds) or 900
+                local lastScan = tonumber(PCF_DB.lastFullScan) or 0
+                if lastScan <= 0 or (time() - lastScan) >= cooldown then
+                    C_Timer.After(0.5, function()
+                        local parent = _G.AuctionFrame or _G.AuctionHouseFrame
+                        local frameShown = parent ~= nil and ((type(parent.IsShown) == "function" and parent:IsShown()) or (type(parent.IsShown) ~= "function" and parent.shown ~= false))
+                        if ahOpen and frameShown and not isScanning and IsScanButtonEnabled() and PCF_DB and PCF_DB.settings and PCF_DB.settings.autoScanOnOpen ~= false then
+                            local currentLastScan = tonumber(PCF_DB.lastFullScan) or 0
+                            local currentCooldown = tonumber(PCF_DB.settings.autoScanCooldownSeconds) or 900
+                            if currentLastScan <= 0 or (time() - currentLastScan) >= currentCooldown then
+                                PCF.Scanner.StartScan()
+                            end
+                        end
+                    end)
+                end
+            end
         elseif event == "AUCTION_HOUSE_CLOSED" then
+            ahOpen = false
             if isScanning then
                 PCF.Scanner.StopScan("AH closed. Scan aborted.")
             end
@@ -1098,7 +1186,7 @@ function PCF.Scanner.Init()
             if isScanning and isBrowseScanning then
                 ProcessModernBrowseBatch(arg1)
             elseif not isScanning then
-                PCF.Scanner.SniffVisiblePage()
+                PCF.Scanner.SniffVisiblePage(arg1)
             end
         elseif event == "COMMODITY_SEARCH_RESULTS_UPDATED" or event == "COMMODITY_SEARCH_RESULTS_ADDED" then
             if not isScanning then

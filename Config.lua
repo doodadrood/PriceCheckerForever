@@ -34,6 +34,11 @@ local defaultConfig = {
         preferredProvider = "AUTO", -- "AUTO", "TSM", "AUCTIONATOR", "NATIVE"
         showScanButton = true,
         showTooltip = true,
+        userSetScanButton = false,
+        userSetTooltip = false,
+        autoScanOnOpen = true,
+        autoScanCooldownSeconds = 900,
+        preferReplicateScan = false,
         enablePassiveSniffing = true,
         enablePeerSync = true,
         enableSniffExternalAddons = true,
@@ -84,8 +89,12 @@ function PCF.LoadConfig(customDB)
     ApplyDefaults(PCF_DB, defaultConfig)
 
     if PCF.HasExternalAuctionAddon() then
-        PCF_DB.settings.showScanButton = false
-        PCF_DB.settings.showTooltip = false
+        if not PCF_DB.settings.userSetScanButton then
+            PCF_DB.settings.showScanButton = false
+        end
+        if not PCF_DB.settings.userSetTooltip then
+            PCF_DB.settings.showTooltip = false
+        end
     end
 
     return PCF_DB

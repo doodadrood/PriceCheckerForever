@@ -18,6 +18,8 @@ local EXTERNAL_PROVIDER_NAMES = {
     Auctionator = true,
 }
 
+local EXTERNAL_FRESH_SECONDS = 21600 -- 6 hours
+
 function PCF.ProviderRegistry.Register(name, priority, queryFunc)
     for i = #providers, 1, -1 do
         if providers[i].name == name then
@@ -28,7 +30,7 @@ function PCF.ProviderRegistry.Register(name, priority, queryFunc)
     table.sort(providers, function(a, b) return a.priority < b.priority end)
 end
 
-local function CacheExternalProviderPrice(providerName, itemId, price, externalTimestamp)
+local function CacheExternalProviderPrice(providerName, itemId, price, externalTimestamp, externalCount)
     if not EXTERNAL_PROVIDER_NAMES[providerName] or not itemId or not price or price <= 0 then
         return
     end
@@ -40,30 +42,45 @@ local function CacheExternalProviderPrice(providerName, itemId, price, externalT
     end
 
     local now = time()
-    local itemTimestamp = (type(externalTimestamp) == "number" and externalTimestamp > 0 and externalTimestamp <= (now + 60))
-        and externalTimestamp
+    local hasValidExternalTs = type(externalTimestamp) == "number" and externalTimestamp > 0 and externalTimestamp <= (now + 60)
+    local existing = PCF_DB.prices[itemId]
+    local itemTimestamp = hasValidExternalTs
+        and math.floor(externalTimestamp)
+        or (existing and type(existing.lastUpdated) == "number" and existing.lastUpdated > 0 and existing.lastUpdated)
         or now
     local flooredPrice = math.floor(price)
-    local existing = PCF_DB.prices[itemId]
+    local hasValidCount = type(externalCount) == "number" and externalCount > 0
+    local resolvedCount = hasValidCount
+        and math.floor(externalCount)
+        or (existing and type(existing.count) == "number" and existing.count > 0 and existing.count)
+        or 1
 
-    if not existing or existing.minBuyout ~= flooredPrice or (now - (existing.lastUpdated or 0)) >= 3600 then
+    if not existing
+        or existing.minBuyout ~= flooredPrice
+        or (hasValidCount and existing.count ~= resolvedCount)
+        or (hasValidExternalTs and existing.lastUpdated ~= itemTimestamp)
+        or (now - (existing.lastUpdated or 0)) >= 3600
+    then
         if existing then
             existing.minBuyout = flooredPrice
             existing.minBid = flooredPrice
             existing.lastUpdated = itemTimestamp
+            existing.count = resolvedCount
             existing.source = "PCF Sniff"
         else
             PCF_DB.prices[itemId] = {
                 minBuyout = flooredPrice,
                 minBid = flooredPrice,
                 lastUpdated = itemTimestamp,
-                count = 1,
+                count = resolvedCount,
                 source = "PCF Sniff",
             }
         end
 
-        if PCF.MeshSync and PCF.MeshSync.MarkDirty then
-            PCF.MeshSync.MarkDirty(itemId)
+        if hasValidExternalTs and (now - itemTimestamp) <= EXTERNAL_FRESH_SECONDS then
+            if PCF.MeshSync and PCF.MeshSync.MarkDirty then
+                PCF.MeshSync.MarkDirty(itemId)
+            end
         end
     end
 end
@@ -98,9 +115,9 @@ function PCF.ProviderRegistry.ResolveAHPrice(itemLink, itemId)
     if preferredName then
         for _, provider in ipairs(providers) do
             if provider.name == preferredName then
-                local price, source, timestamp = provider.query(itemLink, itemId)
+                local price, source, timestamp, count = provider.query(itemLink, itemId)
                 if price and price > 0 then
-                    CacheExternalProviderPrice(provider.name, itemId, price, timestamp)
+                    CacheExternalProviderPrice(provider.name, itemId, price, timestamp, count)
                     return price, source
                 end
             end
@@ -108,9 +125,9 @@ function PCF.ProviderRegistry.ResolveAHPrice(itemLink, itemId)
     end
 
     for _, provider in ipairs(providers) do
-        local price, source, timestamp = provider.query(itemLink, itemId)
+        local price, source, timestamp, count = provider.query(itemLink, itemId)
         if price and price > 0 then
-            CacheExternalProviderPrice(provider.name, itemId, price, timestamp)
+            CacheExternalProviderPrice(provider.name, itemId, price, timestamp, count)
             return price, source
         end
     end
