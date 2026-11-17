@@ -1038,13 +1038,11 @@ function PCF.Scanner.StartScan(forceReplicate)
 
     -- Modern C_AuctionHouse path if legacy QueryAuctionItems is unavailable
     if not QueryAuctionItems and C_AuctionHouse then
-        local preferReplicate = (forceReplicate == true)
-            or (PCF_DB and PCF_DB.settings and PCF_DB.settings.preferReplicateScan == true)
-
-        if not preferReplicate and C_AuctionHouse.SendBrowseQuery then
-            print("|cff00ff00[PCF]|r Starting full AH scan...")
-            StartModernBrowseScan()
-            return
+        local preferReplicate
+        if forceReplicate ~= nil then
+            preferReplicate = (forceReplicate == true)
+        else
+            preferReplicate = not (PCF_DB and PCF_DB.settings and PCF_DB.settings.preferReplicateScan == false)
         end
 
         local nowTs = time()
@@ -1056,7 +1054,10 @@ function PCF.Scanner.StartScan(forceReplicate)
         local requestOver = replicateRequestedAt == nil
             or nowTs < replicateRequestedAt
             or (nowTs - replicateRequestedAt) >= REPLICATE_COOLDOWN_SECONDS
-        local replicateReady = C_AuctionHouse.ReplicateItems ~= nil and cooldownOver and requestOver
+        local replicateReady = (preferReplicate or not C_AuctionHouse.SendBrowseQuery)
+            and C_AuctionHouse.ReplicateItems ~= nil
+            and cooldownOver
+            and requestOver
 
         if replicateReady then
             isScanning = true
@@ -1082,6 +1083,7 @@ function PCF.Scanner.StartScan(forceReplicate)
 
             if not okReplicate then
                 replicatePending = false
+                replicateRequestedAt = nil
                 SafeUnregisterEvent(scanFrame, "REPLICATE_ITEM_LIST_UPDATE")
                 if C_AuctionHouse.SendBrowseQuery then
                     StartModernBrowseScan()

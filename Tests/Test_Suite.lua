@@ -406,18 +406,18 @@ Assert(tocAddonTable.Scanner.scanButton:GetText() == "PCF Scan", "Button resets 
 Assert(tocAddonTable.Scanner.progressText:GetText():find("100%% Done") ~= nil, "Progress text shows 100% Done on completion")
 Assert(PCF_DB.prices[12360] and PCF_DB.prices[12360].minBuyout == 145000, "Scanner computes unit buyout (290000 / 2 = 145000c)")
 
--- Modern C_AuctionHouse scan test: uses SendBrowseQuery as primary fast path with empty sorts = {}
+-- Modern C_AuctionHouse scan test within 15-minute ReplicateItems cooldown (uses SendBrowseQuery fallback with empty sorts = {})
 local savedQueryAuctionItems = _G.QueryAuctionItems
 _G.QueryAuctionItems = nil
 local browseQueryCalled = false
 local capturedBrowseQuery = nil
-local replicateCalledDuringPrimary = false
+local replicateCalledDuringCooldown = false
 local browseResultsData = {
     { itemKey = { itemID = 13468 }, minPrice = 42000, totalQuantity = 12 },
 }
 _G.C_AuctionHouse = {
     ReplicateItems = function()
-        replicateCalledDuringPrimary = true
+        replicateCalledDuringCooldown = true
     end,
     SendBrowseQuery = function(q)
         browseQueryCalled = true
@@ -430,18 +430,17 @@ _G.C_AuctionHouse = {
         return true
     end,
 }
-Mock.currentTime = Mock.currentTime + 540
-PCF_DB.lastReplicateScan = 0 -- Even when ReplicateItems is off cooldown, SendBrowseQuery is primary
+Assert(PCF_DB.settings.preferReplicateScan == true, "Default preferReplicateScan is true (full API replicate scan primary)")
+Mock.currentTime = Mock.currentTime + 540 -- 9 minutes after previous scan
+PCF_DB.lastReplicateScan = time() - 540 -- a real ReplicateItems scan ran 9 minutes ago (< 15m server cooldown)
 tocAddonTable.Scanner.scanButton:Click()
-Assert(browseQueryCalled == true and replicateCalledDuringPrimary == false, "Use C_AuctionHouse.SendBrowseQuery as primary modern scan path without calling ReplicateItems")
+Assert(browseQueryCalled == true and replicateCalledDuringCooldown == false, "Use C_AuctionHouse.SendBrowseQuery when ReplicateItems is within 15-minute cooldown")
 Assert(type(capturedBrowseQuery) == "table" and type(capturedBrowseQuery.sorts) == "table" and #capturedBrowseQuery.sorts == 0, "Pass empty sorts = {} in StartModernBrowseScan")
 tocAddonTable.Scanner.frame:Trigger("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
 Assert(tocAddonTable.Scanner.scanButton:GetText() == "PCF Scan", "Browse-all scan completes cleanly without hanging")
 Assert(PCF_DB.prices[13468] and PCF_DB.prices[13468].minBuyout == 42000, "Browse-all scan records item minPrice accurately")
 
--- Replicate-first API scan (/pcf replicate mode): waits for REPLICATE_ITEM_LIST_UPDATE and only falls back to browse after the timeout
-SlashCmdList["PRICECHECKERFOREVER"]("replicate")
-Assert(PCF_DB.settings.preferReplicateScan == true, "/pcf replicate enables preferReplicateScan mode")
+-- Replicate-first API scan (default): waits for REPLICATE_ITEM_LIST_UPDATE and only falls back to browse after the timeout
 local replicateCalls, replicateBrowseCalls = 0, 0
 local replicateData = {}
 _G.C_AuctionHouse = {
@@ -508,8 +507,21 @@ scanner.scanButton:Click()
 Assert(replicateCalls == callsAfterRequest and replicateBrowseCalls == browseBeforeRetry + 1, "Retry after a timed-out replicate goes straight to browse")
 scanner.frame:Trigger("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
 Assert(scanner.scanButton:GetText() == "PCF Scan", "Browse retry completes cleanly")
+
+-- E. /pcf replicate toggle switches to browse-first when desired and persists across LoadConfig
+Mock.currentTime = Mock.currentTime + 1000 -- beyond 15m session replicateRequestedAt cooldown
+PCF_DB.lastReplicateScan = 0
 SlashCmdList["PRICECHECKERFOREVER"]("replicate")
-Assert(PCF_DB.settings.preferReplicateScan == false, "/pcf replicate toggles preferReplicateScan back OFF")
+Assert(PCF_DB.settings.preferReplicateScan == false and PCF_DB.settings.userSetScanMode == true, "/pcf replicate toggles preferReplicateScan OFF and records userSetScanMode")
+PCF.LoadConfig(PCF_DB)
+Assert(PCF_DB.settings.preferReplicateScan == false, "PCF.LoadConfig preserves explicit /pcf replicate OFF preference across reloads")
+local repCallsBeforeBrowseToggle = replicateCalls
+local browseCallsBeforeBrowseToggle = replicateBrowseCalls
+scanner.scanButton:Click()
+Assert(replicateCalls == repCallsBeforeBrowseToggle and browseCallsBeforeBrowseToggle + 1 == replicateBrowseCalls, "Explicit /pcf replicate OFF goes straight to SendBrowseQuery")
+scanner.frame:Trigger("AUCTION_HOUSE_BROWSE_RESULTS_UPDATED")
+SlashCmdList["PRICECHECKERFOREVER"]("replicate")
+Assert(PCF_DB.settings.preferReplicateScan == true, "/pcf replicate toggles preferReplicateScan back ON")
 _G.C_AuctionHouse = nil
 _G.QueryAuctionItems = savedQueryAuctionItems
 
@@ -1050,15 +1062,22 @@ do
     PCF.LoadConfig(PCF_DB)
     Assert(PCF_DB.settings.showScanButton == true and PCF_DB.settings.showTooltip == true, "PCF.LoadConfig restores showScanButton and showTooltip when previously installed external addon is removed")
 
+    -- Migrate v1.0.20/v1.0.21 SavedVariables where preferReplicateScan defaulted to false without userSetScanMode
+    PCF_DB.settings.preferReplicateScan = false
+    PCF_DB.settings.userSetScanMode = nil
+    PCF.LoadConfig(PCF_DB)
+    Assert(PCF_DB.settings.preferReplicateScan == true and PCF_DB.settings.userSetScanMode == false, "PCF.LoadConfig restores preferReplicateScan = true when upgrading from v1.0.20/v1.0.21 without userSetScanMode")
+
     -- /pcf default (and /pcf reset) resets customized settings back to baseline defaults
     PCF_DB.settings.enabled = false
     PCF_DB.settings.showScanButton = false
     PCF_DB.settings.showTooltip = false
     PCF_DB.settings.userSetScanButton = true
     PCF_DB.settings.userSetTooltip = true
+    PCF_DB.settings.userSetScanMode = true
     PCF_DB.settings.preferredProvider = "TSM"
     PCF_DB.settings.autoScanOnOpen = true
-    PCF_DB.settings.preferReplicateScan = true
+    PCF_DB.settings.preferReplicateScan = false
     tocAddonTable.Scanner.UpdateVisibility()
     Assert(tocAddonTable.Scanner.scanButton.shown == false, "Scan button hidden before /pcf default")
     SlashCmdList["PRICECHECKERFOREVER"]("default")
@@ -1068,11 +1087,12 @@ do
             and PCF_DB.settings.showTooltip == true
             and PCF_DB.settings.userSetScanButton == false
             and PCF_DB.settings.userSetTooltip == false
+            and PCF_DB.settings.userSetScanMode == false
             and PCF_DB.settings.preferredProvider == "AUTO"
             and PCF_DB.settings.autoScanOnOpen == false
-            and PCF_DB.settings.preferReplicateScan == false
+            and PCF_DB.settings.preferReplicateScan == true
             and tocAddonTable.Scanner.scanButton.shown == true,
-        "/pcf default resets all PCF settings to baseline defaults (with autoScanOnOpen OFF) and restores AH scan button"
+        "/pcf default resets all PCF settings to baseline defaults (with autoScanOnOpen OFF and preferReplicateScan ON) and restores AH scan button"
     )
     _G.Auctionator = tempAuc
     _G.TSM_API = tempTSM

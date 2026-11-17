@@ -161,6 +161,7 @@ local function RegisterSlashCommands()
             print(string.format("|cff00ff00[PCF]|r Auto-Scan on AH Open: %s", PCF_DB.settings.autoScanOnOpen and "ON" or "OFF"))
         elseif cmd == "replicate" then
             PCF_DB.settings.preferReplicateScan = not PCF_DB.settings.preferReplicateScan
+            PCF_DB.settings.userSetScanMode = true
             print(string.format("|cff00ff00[PCF]|r Replicate Full Scan Mode: %s", PCF_DB.settings.preferReplicateScan and "ON" or "OFF"))
         elseif cmd == "sniff" then
             PCF_DB.settings.enablePassiveSniffing = not PCF_DB.settings.enablePassiveSniffing
@@ -178,12 +179,12 @@ local function RegisterSlashCommands()
             if PCF.Tooltip and PCF.Tooltip.RefreshVisibleTooltip then
                 PCF.Tooltip.RefreshVisibleTooltip()
             end
-            print("|cff00ff00[PCF]|r Settings reset to defaults (AH Scan Button: ON, Tooltip: ON, Auto-Scan: OFF, Provider: AUTO).")
+            print("|cff00ff00[PCF]|r Settings reset to defaults (AH Scan Button: ON, Tooltip: ON, Auto-Scan: OFF, Replicate Scan: ON, Provider: AUTO).")
         else
             print("|cff00ff00PriceCheckerForever Commands:|r")
             print("  /pcf scan      - Perform full AH scan (must have AH window open)")
             print("  /pcf autoscan  - Toggle automatic cooldown-gated AH scan on open")
-            print("  /pcf replicate - Toggle ReplicateItems vs fast Browse summary scan mode")
+            print("  /pcf replicate - Toggle full API scan (ReplicateItems) vs paginated browse mode")
             print("  /pcf toggle    - Enable or disable automatic replies")
             print("  /pcf button    - Toggle the AH window scan button on or off")
             print("  /pcf tooltip   - Toggle item tooltip AH price display on or off")

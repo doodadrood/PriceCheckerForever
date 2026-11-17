@@ -36,9 +36,10 @@ local defaultConfig = {
         showTooltip = true,
         userSetScanButton = false,
         userSetTooltip = false,
+        userSetScanMode = false,
         autoScanOnOpen = false,
         autoScanCooldownSeconds = 900,
-        preferReplicateScan = false,
+        preferReplicateScan = true,
         enablePassiveSniffing = true,
         enablePeerSync = true,
         enableSniffExternalAddons = true,
@@ -87,6 +88,10 @@ function PCF.LoadConfig(customDB)
     _G.GPC_DB = PCF_DB
 
     ApplyDefaults(PCF_DB, defaultConfig)
+
+    if not PCF_DB.settings.userSetScanMode then
+        PCF_DB.settings.preferReplicateScan = true
+    end
 
     if PCF.HasExternalAuctionAddon() then
         if not PCF_DB.settings.userSetScanButton then
