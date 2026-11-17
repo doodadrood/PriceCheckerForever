@@ -1057,7 +1057,7 @@ do
     PCF_DB.settings.userSetScanButton = true
     PCF_DB.settings.userSetTooltip = true
     PCF_DB.settings.preferredProvider = "TSM"
-    PCF_DB.settings.autoScanOnOpen = false
+    PCF_DB.settings.autoScanOnOpen = true
     PCF_DB.settings.preferReplicateScan = true
     tocAddonTable.Scanner.UpdateVisibility()
     Assert(tocAddonTable.Scanner.scanButton.shown == false, "Scan button hidden before /pcf default")
@@ -1069,20 +1069,22 @@ do
             and PCF_DB.settings.userSetScanButton == false
             and PCF_DB.settings.userSetTooltip == false
             and PCF_DB.settings.preferredProvider == "AUTO"
-            and PCF_DB.settings.autoScanOnOpen == true
+            and PCF_DB.settings.autoScanOnOpen == false
             and PCF_DB.settings.preferReplicateScan == false
             and tocAddonTable.Scanner.scanButton.shown == true,
-        "/pcf default resets all PCF settings to baseline defaults and restores AH scan button"
+        "/pcf default resets all PCF settings to baseline defaults (with autoScanOnOpen OFF) and restores AH scan button"
     )
     _G.Auctionator = tempAuc
     _G.TSM_API = tempTSM
 
     -- (6) Optional cooldown-gated auto-scan on AUCTION_HOUSE_SHOW (/pcf autoscan)
-    Assert(PCF_DB.settings.autoScanOnOpen == true and PCF_DB.settings.autoScanCooldownSeconds == 900, "Default config enables autoScanOnOpen with 900s (15m) cooldown")
+    Assert(PCF_DB.settings.autoScanOnOpen == false and PCF_DB.settings.autoScanCooldownSeconds == 900, "Default config keeps autoScanOnOpen OFF with 900s (15m) cooldown")
     SlashCmdList["PRICECHECKERFOREVER"]("autoscan")
-    Assert(PCF_DB.settings.autoScanOnOpen == false, "/pcf autoscan toggles autoScanOnOpen OFF")
+    Assert(PCF_DB.settings.autoScanOnOpen == true, "/pcf autoscan toggles autoScanOnOpen ON")
     SlashCmdList["PRICECHECKERFOREVER"]("autoscan")
-    Assert(PCF_DB.settings.autoScanOnOpen == true, "/pcf autoscan toggles autoScanOnOpen back ON")
+    Assert(PCF_DB.settings.autoScanOnOpen == false, "/pcf autoscan toggles autoScanOnOpen back OFF")
+    SlashCmdList["PRICECHECKERFOREVER"]("autoscan")
+    Assert(PCF_DB.settings.autoScanOnOpen == true, "/pcf autoscan re-enables autoScanOnOpen for auto-scan tests")
 
     local autoScanStarted = 0
     _G.C_AuctionHouse = {

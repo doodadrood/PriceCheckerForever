@@ -1154,14 +1154,14 @@ function PCF.Scanner.Init()
             ahOpen = true
             CreateAuctionHouseUI()
             InstallSellFrameHooks()
-            if PCF_DB and PCF_DB.settings and PCF_DB.settings.autoScanOnOpen ~= false and IsScanButtonEnabled() and not isScanning then
+            if PCF_DB and PCF_DB.settings and PCF_DB.settings.autoScanOnOpen == true and IsScanButtonEnabled() and not isScanning then
                 local cooldown = tonumber(PCF_DB.settings.autoScanCooldownSeconds) or 900
                 local lastScan = tonumber(PCF_DB.lastFullScan) or 0
                 if lastScan <= 0 or (time() - lastScan) >= cooldown then
                     C_Timer.After(0.5, function()
                         local parent = _G.AuctionFrame or _G.AuctionHouseFrame
                         local frameShown = parent ~= nil and ((type(parent.IsShown) == "function" and parent:IsShown()) or (type(parent.IsShown) ~= "function" and parent.shown ~= false))
-                        if ahOpen and frameShown and not isScanning and IsScanButtonEnabled() and PCF_DB and PCF_DB.settings and PCF_DB.settings.autoScanOnOpen ~= false then
+                        if ahOpen and frameShown and not isScanning and IsScanButtonEnabled() and PCF_DB and PCF_DB.settings and PCF_DB.settings.autoScanOnOpen == true then
                             local currentLastScan = tonumber(PCF_DB.lastFullScan) or 0
                             local currentCooldown = tonumber(PCF_DB.settings.autoScanCooldownSeconds) or 900
                             if currentLastScan <= 0 or (time() - currentLastScan) >= currentCooldown then

@@ -178,7 +178,7 @@ local function RegisterSlashCommands()
             if PCF.Tooltip and PCF.Tooltip.RefreshVisibleTooltip then
                 PCF.Tooltip.RefreshVisibleTooltip()
             end
-            print("|cff00ff00[PCF]|r Settings reset to defaults (AH Scan Button: ON, Tooltip: ON, Auto-Scan: ON, Provider: AUTO).")
+            print("|cff00ff00[PCF]|r Settings reset to defaults (AH Scan Button: ON, Tooltip: ON, Auto-Scan: OFF, Provider: AUTO).")
         else
             print("|cff00ff00PriceCheckerForever Commands:|r")
             print("  /pcf scan      - Perform full AH scan (must have AH window open)")
