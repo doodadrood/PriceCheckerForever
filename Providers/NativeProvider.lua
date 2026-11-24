@@ -20,7 +20,7 @@ local function QueryNative(itemLink, itemId)
         local ageStr = (PCF.Formatter and PCF.Formatter.FormatRelativeAge and PCF.Formatter.FormatRelativeAge(timestamp))
             or string.format("%dm ago", math.max(0, math.floor((time() - timestamp) / 60)))
         local sourceTag = string.format("%s (%s)", label, ageStr)
-        return data.minBuyout, sourceTag
+        return data.minBuyout, sourceTag, (timestamp > 0 and timestamp or nil)
     end
     return nil
 end

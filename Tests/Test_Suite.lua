@@ -168,12 +168,16 @@ Assert(#Mock.chatMessages == 1, "Enforce 3.0s per-sender rate limit cooldown")
 PCF.ChatListener.frame:Trigger("CHAT_MSG_WHISPER", "? |cffff8000|Hitem:19019:0:0:0|h[Thunderfury]|h|r", "LocalPlayer")
 Assert(#Mock.chatMessages == 1, "Ignore queries sent by LocalPlayer")
 
--- Guild consensus deduplication test
+-- Guild consensus deduplication test (two-phase BID -> settle -> CLAIM + guild chat)
 Mock.currentTime = 1010.0
 PCF.ChatListener.frame:Trigger("CHAT_MSG_GUILD", "pc |cffff8000|Hitem:19019:0:0:0|h[Thunderfury]|h|r", "GuildMate")
 Assert(#Mock.timers == 1, "Schedule backoff timer for Guild query")
 Mock.timers[1].callback()
-Assert(#Mock.addonMessages == 1 and Mock.addonMessages[1].prefix == "PCF_SYNC", "Broadcast PCF_SYNC CLAIM before guild chat response")
+Assert(#Mock.addonMessages == 1 and Mock.addonMessages[1].prefix == "PCF_SYNC" and Mock.addonMessages[1].msg:find("^BID:19019:1:0:") ~= nil, "Broadcast PCF_SYNC BID for TSM Tier 1 before settling")
+Assert(#Mock.chatMessages == 1, "Wait through settle window before posting to GUILD chat")
+Assert(#Mock.timers == 2 and Mock.timers[2].delay == 0.65, "Schedule 0.65s settle window timer after BID")
+Mock.timers[2].callback()
+Assert(#Mock.addonMessages == 2 and Mock.addonMessages[2].prefix == "PCF_SYNC" and Mock.addonMessages[2].msg == "CLAIM:19019", "Broadcast PCF_SYNC CLAIM before guild chat response")
 Assert(#Mock.chatMessages == 2 and Mock.chatMessages[2].channel == "GUILD", "Broadcast price response to GUILD chat")
 
 -- Peer claim suppression test
@@ -262,21 +266,28 @@ PCF.ChatListener.frame:Trigger("CHAT_MSG_GUILD", "? |cffff8000|Hitem:19019:0:0:0
 Assert(#Mock.timers == timersBeforeVisible, "Stay silent when another player's price reply was already seen in guild chat")
 
 -- Follow-up guild queries for the same item after the 3s sender cooldown (including leading & internal spaces) still get answered
+local function RunTwoPhaseGuildTimers()
+    local bidIdx = #Mock.timers
+    Mock.timers[bidIdx].callback()
+    if #Mock.timers > bidIdx then
+        Mock.timers[#Mock.timers].callback()
+    end
+end
 PCF_DB.prices[4234] = { minBuyout = 250, minBid = 200, lastUpdated = math.floor(Mock.currentTime), count = 20, source = "PCF Sniff" }
 Mock.currentTime = 2110.0
 local chatBeforeFollowUp = #Mock.chatMessages
 PCF.ChatListener.frame:Trigger("CHAT_MSG_GUILD", "?|cffffffff|Hitem:4234:0:0:0|h[Heavy Leather]|h|rx20", "Ferris Zeusler")
-Mock.timers[#Mock.timers].callback()
+RunTwoPhaseGuildTimers()
 Assert(#Mock.chatMessages == chatBeforeFollowUp + 1, "First guild query ?[Heavy Leather]x20 responds")
 
 Mock.currentTime = 2115.0 -- 5s later (> 3s sender cooldown, previously blocked by 60s claim window)
 PCF.ChatListener.frame:Trigger("CHAT_MSG_GUILD", " ?|cffffffff|Hitem:4234:0:0:0|h[Heavy Leather]|h|rx20", "Ferris Zeusler")
-Mock.timers[#Mock.timers].callback()
+RunTwoPhaseGuildTimers()
 Assert(#Mock.chatMessages == chatBeforeFollowUp + 2, "Second guild query with leading space ' ?[Heavy Leather]x20' responds after 3s cooldown")
 
 Mock.currentTime = 2120.0 -- another 5s later with internal spaces
 PCF.ChatListener.frame:Trigger("CHAT_MSG_GUILD", "? |cffffffff|Hitem:4234:0:0:0|h[Heavy Leather]|h|r x 20", "Ferris Zeusler")
-Mock.timers[#Mock.timers].callback()
+RunTwoPhaseGuildTimers()
 Assert(#Mock.chatMessages == chatBeforeFollowUp + 3, "Third guild query with internal spaces '? [Heavy Leather] x 20' responds")
 PCF_DB.prices[4234] = nil
 
@@ -308,7 +319,11 @@ Assert(#Mock.timers == timersBeforeRepeat + 1, "Do not re-request the same item 
 -- If peer data arrives while waiting, the delayed reply uses it (price is re-resolved at send time)
 PCF.MeshSync.ApplyDeltaPayload(string.format("DELTA:77001:5000:%d", time() - 100))
 local chatBeforeLate = #Mock.chatMessages
+local timersBeforeNoDataFire = #Mock.timers
 noDataTimer.callback()
+if #Mock.timers > timersBeforeNoDataFire then
+    Mock.timers[#Mock.timers].callback()
+end
 local lateReply = Mock.chatMessages[#Mock.chatMessages]
 Assert(#Mock.chatMessages == chatBeforeLate + 1 and lateReply.channel == "GUILD" and lateReply.msg:find("50s", 1, true) and lateReply.msg:find("PCF Mesh", 1, true), "Delayed guild reply uses peer data that arrived while waiting")
 PCF_DB.prices[77001] = nil
@@ -1148,6 +1163,234 @@ do
     _G.AUCTIONATOR_PRICE_DATABASE = savedAucDB
     Mock.auctionListings = savedListings
     Mock.currentTime = savedTime14
+end
+
+-- 15. Guild Consensus Priority Tiering, Staleness Handling & BID/CLAIM Election Tests
+do
+    local savedTime15 = Mock.currentTime
+    local savedUnitName = _G.UnitName
+    local savedSendAddon = _G.C_ChatInfo.SendAddonMessage
+    local savedTimerAfter = _G.C_Timer.After
+    Mock.currentTime = 1794600000
+    local now15 = time()
+    local warAxeId = 15255
+
+    -- A. Quality tiering & exact age ordering (TSM > fresh AH ordered by recency > aging 6h-24h > very stale >= 24h > Vendor > No Data)
+    local tTsm, _, mTsm = PCF.Consensus.ComputeQuality(warAxeId, "TSM DBMarket", nil)
+    local tTsmStale, _, mTsmStale = PCF.Consensus.ComputeQuality(warAxeId, "TSM DBMarket (30h ago)", now15 - (30 * 3600))
+    local tNative1h53, _, mNative1h53 = PCF.Consensus.ComputeQuality(warAxeId, "Native AH Scan (1h 53m ago)", now15 - (113 * 60))
+    local tAuc4h02, _, mAuc4h02 = PCF.Consensus.ComputeQuality(warAxeId, "Auctionator (4h 2m ago)", now15 - (242 * 60))
+    local tAging12h, _, mAging12h = PCF.Consensus.ComputeQuality(warAxeId, "Auctionator (12h ago)", now15 - (12 * 3600))
+    local tAuc29h34, _, mAuc29h34 = PCF.Consensus.ComputeQuality(warAxeId, "Auctionator (29h 34m ago)", now15 - (29 * 3600 + 34 * 60))
+    local tAuc29hParsed, _, mAuc29hParsed = PCF.Consensus.ComputeQuality(warAxeId, "Auctionator (29h 34m ago)", nil)
+    local tVendor = PCF.Consensus.ComputeQuality(warAxeId, "Vendor Base", nil)
+    local tNoData = PCF.Consensus.ComputeQuality(warAxeId, "No Data", nil)
+
+    Assert(tTsm == 1 and mTsm == 0, "Live TSM DBMarket ranks Tier 1 (highest priority)")
+    Assert(tNative1h53 == 2 and mNative1h53 == 113, "Native AH Scan (1h 53m ago) ranks Tier 2 with 113m age")
+    Assert(tAuc4h02 == 2 and mAuc4h02 == 242, "Auctionator (4h 2m ago) ranks Tier 2 with 242m age")
+    Assert(tAging12h == 3 and mAging12h == 720, "12h old Auctionator data ranks Tier 3 (aging)")
+    Assert(tAuc29h34 == 4 and mAuc29h34 == 1774, "29h 34m old Auctionator data ranks Tier 4 (very stale, yields to fresh & TSM)")
+    Assert(tAuc29hParsed == 4 and mAuc29hParsed == 1774, "Parse relative age from source tag when explicit timestamp is absent")
+    Assert(tTsmStale == 4 and mTsmStale == 1800, "Explicitly stale timestamped TSM (> 24h) is demoted to Tier 4")
+    Assert(tVendor == 5 and tNoData == 6, "Vendor Base ranks Tier 5 and No Data ranks Tier 6")
+
+    -- B. Monotonic bid delay ordering across all tiers and recency levels
+    PCF.Consensus.ResetClaims()
+    local function MeasureBidDelay(source, ts)
+        PCF.Consensus.ResetClaims()
+        local before = #Mock.timers
+        PCF.Consensus.DispatchGuildResponse(warAxeId, function() end, source, ts)
+        return Mock.timers[before + 1].delay
+    end
+    local dTsm = MeasureBidDelay("TSM DBMarket", nil)
+    local dNative1h53 = MeasureBidDelay("Native AH Scan (1h 53m ago)", now15 - (113 * 60))
+    local dAuc4h02 = MeasureBidDelay("Auctionator (4h 2m ago)", now15 - (242 * 60))
+    local dAging12h = MeasureBidDelay("Auctionator (12h ago)", now15 - (12 * 3600))
+    local dAuc29h34 = MeasureBidDelay("Auctionator (29h 34m ago)", now15 - (29 * 3600 + 34 * 60))
+    local dVendor = MeasureBidDelay("Vendor Base", nil)
+    local dNoData = MeasureBidDelay("No Data", nil)
+    Assert(
+        dTsm < dNative1h53
+            and dNative1h53 < dAuc4h02
+            and dAuc4h02 < dAging12h
+            and dAging12h < dAuc29h34
+            and dAuc29h34 < dVendor
+            and dVendor < dNoData,
+        string.format(
+            "Bid delays strictly order TSM (%.2fs) < 1h53m (%.2fs) < 4h2m (%.2fs) < 12h (%.2fs) < 29h34m (%.2fs) < Vendor (%.2fs) < NoData (%.2fs)",
+            dTsm, dNative1h53, dAuc4h02, dAging12h, dAuc29h34, dVendor, dNoData
+        )
+    )
+
+    -- C. Peer TSM BID suppresses non-TSM node BEFORE it even broadcasts a BID
+    PCF.Consensus.ResetClaims()
+    local addonBeforeSupp = #Mock.addonMessages
+    local firedCount = 0
+    local timersBeforeSupp = #Mock.timers
+    PCF.Consensus.DispatchGuildResponse(warAxeId, function() firedCount = firedCount + 1 end, "Auctionator (29h 34m ago)", now15 - (29 * 3600 + 34 * 60))
+    PCF.Consensus.frame:Trigger("CHAT_MSG_ADDON", "PCF_SYNC", string.format("BID:%d:1:0:500000", warAxeId), "GUILD", "Cabel-Realm")
+    Mock.timers[timersBeforeSupp + 1].callback()
+    Assert(#Mock.addonMessages == addonBeforeSupp and firedCount == 0, "Stale node stays completely silent (no BID, no CLAIM, no chat) when TSM peer bids first")
+
+    -- D. Concurrent same-tier BID collision resolves deterministically during settle window
+    PCF.Consensus.ResetClaims()
+    local addonBeforeCol = #Mock.addonMessages
+    local colFired = 0
+    local timersBeforeCol = #Mock.timers
+    PCF.Consensus.DispatchGuildResponse(warAxeId, function() colFired = colFired + 1 end, "TSM DBMarket", nil)
+    -- Step 1: our bidTimer fires and sends our BID
+    Mock.timers[timersBeforeCol + 1].callback()
+    local ourBidMsg = Mock.addonMessages[#Mock.addonMessages].msg
+    local ourRoll = tonumber(ourBidMsg:match("^BID:%d+:%d+:%d+:(%d+)$"))
+    Assert(ourRoll ~= nil, "Outgoing BID encodes itemId, tier, ageMin, and roll")
+    -- Simulate our own echo (must NOT suppress us!) and a peer with a strictly better (lower) roll 0
+    PCF.Consensus.frame:Trigger("CHAT_MSG_ADDON", "PCF_SYNC", ourBidMsg, "GUILD", "LocalPlayer-Realm")
+    PCF.Consensus.frame:Trigger("CHAT_MSG_ADDON", "PCF_SYNC", string.format("BID:%d:1:0:0", warAxeId), "GUILD", "PeerTSM-Realm")
+    Mock.timers[#Mock.timers].callback() -- settleTimer fires
+    Assert(colFired == 0, "Concurrent same-tier peer BID with lower roll suppresses our guild chat response")
+
+    -- E. Self-echo (both normal and secret sender) and losing peer BID do NOT suppress us
+    PCF.Consensus.ResetClaims()
+    local winFired = 0
+    local timersBeforeWin = #Mock.timers
+    PCF.Consensus.DispatchGuildResponse(warAxeId, function() winFired = winFired + 1 end, "TSM DBMarket", nil)
+    Mock.timers[timersBeforeWin + 1].callback()
+    local winBidMsg = Mock.addonMessages[#Mock.addonMessages].msg
+    local secretPeerSender = setmetatable({}, {
+        __eq = function() error("secret compare") end,
+        __index = function() error("secret index") end,
+    })
+    _G.issecretvalue = function(v) return v == secretPeerSender end
+    -- Self echo with secret sender (dungeon context) + peer with higher roll (9999999)
+    PCF.Consensus.frame:Trigger("CHAT_MSG_ADDON", "PCF_SYNC", winBidMsg, "GUILD", secretPeerSender)
+    PCF.Consensus.frame:Trigger("CHAT_MSG_ADDON", "PCF_SYNC", string.format("BID:%d:1:0:9999999", warAxeId), "GUILD", "LosingPeer-Realm")
+    _G.issecretvalue = nil
+    Mock.timers[#Mock.timers].callback()
+    Assert(winFired == 1, "Winning BID ignores self-echo (even with secret sender) and beats higher-roll peer BID")
+
+    -- F. Full 4-client discrete-event simulation of the exact reported guild chat bug (with realistic 220-250ms network RTT)
+    local function RunGuildSimulation(nodes, networkLatencySec)
+        -- Load an isolated Consensus instance per simulated guild member
+        local eventQueue = {}
+        local simNow = 1794600000.0
+        local replies = {}
+        local instances = {}
+        local activeNode = nil
+
+        local function PushEvent(at, ownerNode, fn)
+            table.insert(eventQueue, { at = at, owner = ownerNode, fn = fn })
+        end
+
+        _G.GetTime = function() return simNow end
+        _G.time = function() return math.floor(simNow) end
+        _G.UnitName = function(u)
+            if u == "player" and activeNode then
+                return activeNode.spec.name
+            end
+            return "Target"
+        end
+        _G.C_Timer.After = function(delay, cb)
+            local owner = activeNode
+            PushEvent(simNow + delay, owner, cb)
+        end
+        _G.C_ChatInfo.SendAddonMessage = function(prefix, msg, channel)
+            local senderNode = activeNode
+            for _, target in ipairs(instances) do
+                local deliveryAt = simNow + (target == senderNode and 0.01 or networkLatencySec)
+                PushEvent(deliveryAt, target, function()
+                    target.pcf.Consensus.frame:Trigger("CHAT_MSG_ADDON", prefix, msg, channel, senderNode.spec.name .. "-Realm")
+                end)
+            end
+        end
+
+        for _, spec in ipairs(nodes) do
+            local pcfEnv = {}
+            local node = { spec = spec, pcf = pcfEnv }
+            activeNode = node
+            local chunk = assert(loadfile("Modules/Consensus.lua"))
+            chunk("PriceCheckerForever", pcfEnv)
+            pcfEnv.Consensus.Init()
+            table.insert(instances, node)
+        end
+
+        -- Deliver initial guild query to each node (with per-node ping jitter)
+        for _, node in ipairs(instances) do
+            PushEvent(simNow + (node.spec.pingOffset or 0), node, function()
+                node.pcf.Consensus.DispatchGuildResponse(warAxeId, function()
+                    table.insert(replies, { name = node.spec.name, source = node.spec.source, at = simNow })
+                    -- Also broadcast visible guild chat claim
+                    for _, target in ipairs(instances) do
+                        if target ~= node then
+                            PushEvent(simNow + networkLatencySec, target, function()
+                                target.pcf.Consensus.RegisterClaim(warAxeId)
+                            end)
+                        end
+                    end
+                end, node.spec.source, node.spec.timestamp)
+            end)
+        end
+
+        while #eventQueue > 0 do
+            table.sort(eventQueue, function(a, b) return a.at < b.at end)
+            local nextEv = table.remove(eventQueue, 1)
+            simNow = nextEv.at
+            activeNode = nextEv.owner
+            nextEv.fn()
+        end
+
+        return replies
+    end
+
+    -- Scenario 1: Exact reported 4-guildie mix (TSM + 1h53m Native + 4h2m Auctionator + 29h34m Auctionator)
+    local sim1 = RunGuildSimulation({
+        { name = "Pulleda", source = "Native AH Scan (1h 53m ago)", timestamp = now15 - (113 * 60), pingOffset = 0.01 },
+        { name = "Cabel", source = "TSM DBMarket", timestamp = nil, pingOffset = 0.08 },
+        { name = "Boar", source = "Auctionator (4h 2m ago)", timestamp = now15 - (242 * 60), pingOffset = 0.03 },
+        { name = "Flom", source = "Auctionator (29h 34m ago)", timestamp = now15 - (29 * 3600 + 34 * 60), pingOffset = 0.02 },
+    }, 0.22)
+    Assert(#sim1 == 1 and sim1[1].name == "Cabel", "4-guildie simulation with TSM: ONLY Cabel (TSM DBMarket) responds")
+
+    -- Scenario 2: Same guild without TSM (1h53m Native + 4h2m Auctionator + 29h34m Auctionator)
+    local sim2 = RunGuildSimulation({
+        { name = "Pulleda", source = "Native AH Scan (1h 53m ago)", timestamp = now15 - (113 * 60), pingOffset = 0.06 },
+        { name = "Boar", source = "Auctionator (4h 2m ago)", timestamp = now15 - (242 * 60), pingOffset = 0.02 },
+        { name = "Flom", source = "Auctionator (29h 34m ago)", timestamp = now15 - (29 * 3600 + 34 * 60), pingOffset = 0.01 },
+    }, 0.22)
+    Assert(#sim2 == 1 and sim2[1].name == "Pulleda", "3-guildie simulation without TSM: ONLY Pulleda (freshest 1h 53m scan) responds")
+
+    -- Scenario 3: 4 guildies ALL running TSM DBMarket simultaneously
+    local sim3 = RunGuildSimulation({
+        { name = "TsmAlpha", source = "TSM DBMarket", timestamp = nil, pingOffset = 0.01 },
+        { name = "TsmBeta", source = "TSM DBMarket", timestamp = nil, pingOffset = 0.04 },
+        { name = "TsmGamma", source = "TSM DBMarket", timestamp = nil, pingOffset = 0.07 },
+        { name = "TsmDelta", source = "TSM DBMarket", timestamp = nil, pingOffset = 0.09 },
+    }, 0.25)
+    Assert(#sim3 == 1, "4 simultaneous TSM guildies elect EXACTLY ONE responder (zero duplicates)")
+
+    -- Scenario 4: 4 guildies ALL holding identical Mesh-synced 1h 53m timestamp
+    local sim4 = RunGuildSimulation({
+        { name = "MeshOne", source = "PCF Mesh (1h 53m ago)", timestamp = now15 - (113 * 60), pingOffset = 0.02 },
+        { name = "MeshTwo", source = "PCF Mesh (1h 53m ago)", timestamp = now15 - (113 * 60), pingOffset = 0.05 },
+        { name = "MeshThree", source = "PCF Mesh (1h 53m ago)", timestamp = now15 - (113 * 60), pingOffset = 0.08 },
+        { name = "MeshFour", source = "PCF Mesh (1h 53m ago)", timestamp = now15 - (113 * 60), pingOffset = 0.03 },
+    }, 0.25)
+    Assert(#sim4 == 1, "4 simultaneous Mesh-synced guildies with identical age elect EXACTLY ONE responder")
+
+    -- Scenario 5: Only very stale node online (29h 34m ago) still responds as fallback
+    local sim5 = RunGuildSimulation({
+        { name = "Flom", source = "Auctionator (29h 34m ago)", timestamp = now15 - (29 * 3600 + 34 * 60), pingOffset = 0.01 },
+    }, 0.22)
+    Assert(#sim5 == 1 and sim5[1].name == "Flom", "Lone stale node (29h 34m) still answers when nobody fresher is online")
+
+    -- Restore globals
+    _G.UnitName = savedUnitName
+    _G.C_ChatInfo.SendAddonMessage = savedSendAddon
+    _G.C_Timer.After = savedTimerAfter
+    _G.GetTime = function() return Mock.currentTime end
+    _G.time = function() return math.floor(Mock.currentTime) end
+    Mock.currentTime = savedTime15
+    PCF.Consensus.ResetClaims()
 end
 
 print("\n--- All Unit Tests Passed Successfully ---")

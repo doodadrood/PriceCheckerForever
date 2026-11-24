@@ -63,7 +63,7 @@ local function CheckCooldown(sender)
 end
 
 local function BuildPriceResponse(itemLink, itemId, quantity)
-    local ahPrice, ahSource = PCF.ProviderRegistry.ResolveAHPrice(itemLink, itemId)
+    local ahPrice, ahSource, ahTimestamp = PCF.ProviderRegistry.ResolveAHPrice(itemLink, itemId)
     local vendorPrice = PCF.ProviderRegistry.GetVendorPrice and PCF.ProviderRegistry.GetVendorPrice(itemLink, itemId)
 
     local ahFormatted
@@ -101,7 +101,8 @@ local function BuildPriceResponse(itemLink, itemId, quantity)
 
     local effectivePrice = (ahPrice and ahPrice > 0 and ahPrice) or vendorPrice
     local effectiveSource = (ahPrice and ahPrice > 0 and ahSource) or ((vendorPrice and vendorPrice > 0) and "Vendor Base" or "No Data")
-    return responseMsg, effectivePrice, effectiveSource
+    local effectiveTimestamp = (ahPrice and ahPrice > 0 and ahTimestamp) or nil
+    return responseMsg, effectivePrice, effectiveSource, effectiveTimestamp
 end
 
 function PCF.ChatListener.DispatchPriceReply(itemLink, itemId, channel, target, cooldownKey, quantity)
@@ -117,7 +118,7 @@ function PCF.ChatListener.DispatchPriceReply(itemLink, itemId, channel, target, 
         quantity = math.floor(parsedQty) + 0
     end
 
-    local responseMsg, price, source = BuildPriceResponse(itemLink, itemId, quantity)
+    local responseMsg, price, source, timestamp = BuildPriceResponse(itemLink, itemId, quantity)
 
     local upperChannel = (channel or "GUILD"):upper()
     if upperChannel == "WHISPER" then
@@ -143,7 +144,7 @@ function PCF.ChatListener.DispatchPriceReply(itemLink, itemId, channel, target, 
             -- Re-resolve at send time: peer data may have arrived while we waited our turn
             local freshMsg = BuildPriceResponse(itemLink, itemId, quantity)
             SendChatMessage(freshMsg, "GUILD")
-        end, source)
+        end, source, timestamp)
         return true, responseMsg
     elseif upperChannel == "PARTY" or upperChannel == "RAID" or upperChannel == "SAY" or upperChannel == "INSTANCE_CHAT" then
         SendChatMessage(responseMsg, upperChannel)

@@ -118,7 +118,7 @@ function PCF.ProviderRegistry.ResolveAHPrice(itemLink, itemId)
                 local price, source, timestamp, count = provider.query(itemLink, itemId)
                 if price and price > 0 then
                     CacheExternalProviderPrice(provider.name, itemId, price, timestamp, count)
-                    return price, source
+                    return price, source, timestamp
                 end
             end
         end
@@ -128,24 +128,24 @@ function PCF.ProviderRegistry.ResolveAHPrice(itemLink, itemId)
         local price, source, timestamp, count = provider.query(itemLink, itemId)
         if price and price > 0 then
             CacheExternalProviderPrice(provider.name, itemId, price, timestamp, count)
-            return price, source
+            return price, source, timestamp
         end
     end
 
-    return nil, nil
+    return nil, nil, nil
 end
 
 function PCF.ProviderRegistry.ResolvePrice(itemLink, itemId)
-    local ahPrice, ahSource = PCF.ProviderRegistry.ResolveAHPrice(itemLink, itemId)
+    local ahPrice, ahSource, ahTimestamp = PCF.ProviderRegistry.ResolveAHPrice(itemLink, itemId)
     if ahPrice and ahPrice > 0 then
-        return ahPrice, ahSource
+        return ahPrice, ahSource, ahTimestamp
     end
 
     -- Fallback: Vendor Sell Price (Priority 40)
     local vendorPrice = GetVendorPrice(itemLink, itemId)
     if vendorPrice and vendorPrice > 0 then
-        return vendorPrice, "Vendor Base"
+        return vendorPrice, "Vendor Base", nil
     end
 
-    return nil, "No Data"
+    return nil, "No Data", nil
 end
