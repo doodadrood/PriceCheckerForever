@@ -1393,4 +1393,241 @@ do
     PCF.Consensus.ResetClaims()
 end
 
+-- 16. Recipe Tooltip Dual Price Display & Attribution Tests
+do
+    local savedTSM = _G.TSM_API
+    local savedAuc = _G.Auctionator
+    local savedCItem = _G.C_Item
+    local savedCContainer = _G.C_Container
+    local savedShowTooltip = PCF_DB.settings.showTooltip
+
+    _G.TSM_API = nil
+    _G.Auctionator = nil
+    PCF_DB.settings.showTooltip = true
+
+    -- Item IDs:
+    -- 12699 = Plans: Thorium Shield Spike (classID 9 = Recipe)
+    -- 12645 = Thorium Shield Spike (classID 7 = Trade Goods / Item Enhancement)
+    -- 16242 = Formula: Enchant Chest - Major Mana (classID 9 = Recipe, teaches spell only)
+    local plansLink = "|cff1eff00|Hitem:12699:0:0:0|h[Plans: Thorium Shield Spike]|h|r"
+    local spikeLink = "|cff1eff00|Hitem:12645:0:0:0|h[Thorium Shield Spike]|h|r"
+    local formulaLink = "|cffffffff|Hitem:16242:0:0:0|h[Formula: Enchant Chest - Major Mana]|h|r"
+
+    _G.C_Item = {
+        GetItemInfoInstant = function(item)
+            local id = tonumber(item) or (type(item) == "string" and tonumber(item:match("item:(%d+)")))
+            if id == 12699 or id == 16242 then
+                return id, "Recipe", "Blacksmithing", "", 134939, 9, 4
+            elseif id == 12645 then
+                return id, "Trade Goods", "Devices", "", 134421, 7, 3
+            elseif id == 12360 then
+                return id, "Trade Goods", "Metal & Stone", "", 134459, 7, 7
+            end
+            return nil
+        end,
+        GetItemInfo = function(item)
+            local id = tonumber(item) or (type(item) == "string" and tonumber(item:match("item:(%d+)")))
+            if id == 12699 then
+                return "Plans: Thorium Shield Spike", plansLink, 2, 50, 50, "Recipe", "Blacksmithing", 1, "", 134939, 4000, 9, 4
+            elseif id == 12645 then
+                return "Thorium Shield Spike", spikeLink, 2, 50, 45, "Trade Goods", "Devices", 20, "", 134421, 1000, 7, 3
+            elseif id == 16242 then
+                return "Formula: Enchant Chest - Major Mana", formulaLink, 1, 58, 0, "Recipe", "Enchanting", 1, "", 134942, 3000, 9, 8
+            end
+            return nil
+        end,
+    }
+
+    -- Seed prices: Spike = 9g 70s 57c (97057c), Plans = 45g (450000c), Formula = 12g 50s (125000c)
+    PCF_DB.prices[12645] = { minBuyout = 97057, minBid = 95000, lastUpdated = time(), count = 8, source = "Scan" }
+    PCF_DB.prices[12699] = { minBuyout = 450000, minBid = 400000, lastUpdated = time(), count = 1, source = "Scan" }
+    PCF_DB.prices[16242] = { minBuyout = 125000, minBid = 120000, lastUpdated = time(), count = 2, source = "Scan" }
+
+    local expectedItemLine = "   Item Price: " .. tocAddonTable.Formatter.FormatTooltipMoney(97057)
+    local expectedRecipeLine = "Recipe Price: " .. tocAddonTable.Formatter.FormatTooltipMoney(450000)
+
+    local function PopulateRecipeTooltipLines()
+        _G.GameTooltip:ClearLines()
+        _G.GameTooltip:SetOwner(nil)
+        _G.GameTooltip:AddLine("Plans: Thorium Shield Spike")
+        _G.GameTooltip:AddLine(" ")
+        _G.GameTooltip:AddLine("Thorium Shield Spike")
+        _G.GameTooltip:AddLine("Use: Attaches a Thorium Spike to your shield that deals damage every time you block with it.")
+        _G.GameTooltip:AddLine("Requires Blacksmithing (250)")
+        _G.GameTooltip:AddLine("Use: Teaches you how to make a Thorium Shield Spike.")
+        _G.GameTooltip:AddLine("Thorium Bar (4), Dense Grinding Stone (4), Essence of Earth (2)")
+        _G.GameTooltip:AddLine("Requires Blacksmithing (250)")
+        _G.GameTooltip:AddLine("Sell Price: 40s")
+    end
+
+    -- A. Exact reported bug scenario: TooltipDataProcessor has recipe ID (12699) while GetItem() returns crafted item (12645)
+    PopulateRecipeTooltipLines()
+    _G.GameTooltip.itemName = "Thorium Shield Spike"
+    _G.GameTooltip.itemLink = spikeLink
+    tocAddonTable.Tooltip.OnTooltipSetItem(_G.GameTooltip, { id = 12699, hyperlink = plansLink })
+    Assert(#_G.GameTooltip.lines == 11, "Recipe tooltip adds exactly 2 PCF lines below Sell Price (Item Price + Recipe Price)")
+    Assert(_G.GameTooltip.lines[10] == expectedItemLine, "Indented '   Item Price:' displays crafted item's AH price (9g 70s 57c)")
+    Assert(_G.GameTooltip.lines[11] == expectedRecipeLine, "Bottom 'Recipe Price:' displays actual recipe's AH price (45g)")
+
+    -- B. Classic two-pass OnTooltipSetItem (Pass 1 = Recipe 12699, Pass 2 = Crafted Item 12645 without OnTooltipCleared)
+    PopulateRecipeTooltipLines()
+    _G.GameTooltip:SetItem("Plans: Thorium Shield Spike", plansLink)
+    _G.GameTooltip:SetItem("Thorium Shield Spike", spikeLink)
+    Assert(
+        #_G.GameTooltip.lines == 11
+            and _G.GameTooltip.lines[10] == expectedItemLine
+            and _G.GameTooltip.lines[11] == expectedRecipeLine,
+        "Classic two-pass OnTooltipSetItem (Recipe -> Crafted) renders indented Item Price + bottom Recipe Price without overwriting or duplicating"
+    )
+
+    -- B2. Reverse two-pass OnTooltipSetItem (Pass 1 = Crafted Item 12645, Pass 2 = Recipe 12699)
+    PopulateRecipeTooltipLines()
+    _G.GameTooltip:SetItem("Thorium Shield Spike", spikeLink)
+    _G.GameTooltip:SetItem("Plans: Thorium Shield Spike", plansLink)
+    Assert(
+        #_G.GameTooltip.lines == 11
+            and _G.GameTooltip.lines[10] == expectedItemLine
+            and _G.GameTooltip.lines[11] == expectedRecipeLine,
+        "Reverse two-pass OnTooltipSetItem (Crafted -> Recipe) upgrades single line cleanly to Item Price + Recipe Price"
+    )
+
+    -- C. SetHyperlink & SetBagItem post-hooks when C++ GetItem() only exposed the crafted item during OnTooltipSetItem
+    PopulateRecipeTooltipLines()
+    _G.GameTooltip.itemName = "Thorium Shield Spike"
+    _G.GameTooltip.itemLink = spikeLink
+    _G.GameTooltip:SetHyperlink(plansLink)
+    Assert(
+        #_G.GameTooltip.lines == 11
+            and _G.GameTooltip.lines[10] == expectedItemLine
+            and _G.GameTooltip.lines[11] == expectedRecipeLine,
+        "SetHyperlink post-hook resolves outer recipe item when GetItem() returned crafted item"
+    )
+
+    _G.C_Container = {
+        GetContainerItemInfo = function(bag, slot)
+            if bag == 0 and slot == 3 then
+                return { itemID = 12699, hyperlink = plansLink, stackCount = 1 }
+            end
+            return nil
+        end,
+    }
+    PopulateRecipeTooltipLines()
+    _G.GameTooltip.itemName = "Thorium Shield Spike"
+    _G.GameTooltip.itemLink = spikeLink
+    _G.GameTooltip:SetBagItem(0, 3)
+    Assert(
+        #_G.GameTooltip.lines == 11
+            and _G.GameTooltip.lines[10] == expectedItemLine
+            and _G.GameTooltip.lines[11] == expectedRecipeLine,
+        "SetBagItem post-hook resolves outer recipe item from container slot when GetItem() returned crafted item"
+    )
+
+    -- D. TooltipDataProcessor with NestedBlock + mid-render taint guard (does NOT inject lines before Sell Price)
+    _G.GameTooltip:ClearLines()
+    _G.GameTooltip.primaryTooltipData = {
+        type = 0,
+        id = 12699,
+        hyperlink = plansLink,
+        lines = {
+            { type = 19, tooltipType = 0, tooltipID = 12645 },
+        },
+    }
+    _G.GameTooltip:AddLine("Plans: Thorium Shield Spike")
+    _G.GameTooltip:AddLine("Thorium Shield Spike")
+    -- Mid-render post-call for embedded NestedBlock (before Sell Price line is added)
+    tocAddonTable.Tooltip.OnTooltipSetItem(_G.GameTooltip, { type = 0, id = 12645, hyperlink = spikeLink })
+    Assert(#_G.GameTooltip.lines == 2, "Mid-render NestedBlock post-call records crafted ID without adding lines before Sell Price")
+    _G.GameTooltip:AddLine("Use: Teaches you how to make a Thorium Shield Spike.")
+    _G.GameTooltip:AddLine("Sell Price: 40s")
+    _G.GameTooltip.itemName = "Plans: Thorium Shield Spike"
+    _G.GameTooltip.itemLink = plansLink
+    -- Outer recipe post-call after Sell Price finishes
+    tocAddonTable.Tooltip.OnTooltipSetItem(_G.GameTooltip, _G.GameTooltip.primaryTooltipData)
+    Assert(
+        #_G.GameTooltip.lines == 6
+            and _G.GameTooltip.lines[4] == "Sell Price: 40s"
+            and _G.GameTooltip.lines[5] == expectedItemLine
+            and _G.GameTooltip.lines[6] == expectedRecipeLine,
+        "Outer NestedBlock recipe post-call appends Item Price and Recipe Price cleanly after Sell Price"
+    )
+
+    -- E. Recipe with no AH data yet while crafted item has AH data -> Item Price: 9g 70s 57c & Recipe Price: ??
+    PCF_DB.prices[12699] = nil
+    PopulateRecipeTooltipLines()
+    _G.GameTooltip.itemName = "Thorium Shield Spike"
+    _G.GameTooltip.itemLink = spikeLink
+    tocAddonTable.Tooltip.OnTooltipSetItem(_G.GameTooltip, { id = 12699, hyperlink = plansLink })
+    Assert(
+        _G.GameTooltip.lines[10] == expectedItemLine
+            and _G.GameTooltip.lines[11] == "Recipe Price: ??",
+        "Unknown recipe price displays 'Recipe Price: ??' instead of misattributing crafted item's price"
+    )
+
+    -- RefreshVisibleTooltip updates Recipe Price live when AH scan/sniff populates 12699
+    PCF_DB.prices[12699] = { minBuyout = 450000, minBid = 400000, lastUpdated = time(), count = 1, source = "PCF Sniff" }
+    tocAddonTable.Tooltip.RefreshVisibleTooltip()
+    Assert(
+        #_G.GameTooltip.lines == 11
+            and _G.GameTooltip.lines[10] == expectedItemLine
+            and _G.GameTooltip.lines[11] == expectedRecipeLine,
+        "RefreshVisibleTooltip updates Recipe Price in-place without adding duplicate lines"
+    )
+
+    -- F. Enchanting Formula with no crafted item -> single 'Recipe Price:' line
+    _G.GameTooltip:ClearLines()
+    _G.GameTooltip:AddLine("Formula: Enchant Chest - Major Mana")
+    _G.GameTooltip:AddLine("Use: Teaches you how to permanently enchant a piece of chest armor to increase mana by 100.")
+    _G.GameTooltip:AddLine("Sell Price: 30s")
+    _G.GameTooltip:SetItem("Formula: Enchant Chest - Major Mana", formulaLink)
+    Assert(
+        #_G.GameTooltip.lines == 4
+            and _G.GameTooltip.lines[4] == "Recipe Price: " .. tocAddonTable.Formatter.FormatTooltipMoney(125000),
+        "Spell-only Enchanting Formula displays single 'Recipe Price:' line with no 'Item Price:' line"
+    )
+
+    -- G. Moving from a Recipe tooltip directly to a normal item tooltip resets recipe state cleanly
+    _G.GameTooltip:ClearLines()
+    _G.GameTooltip:AddLine("Thorium Shield Spike")
+    _G.GameTooltip:AddLine("Sell Price: 10s")
+    _G.GameTooltip:SetItem("Thorium Shield Spike", spikeLink)
+    Assert(
+        #_G.GameTooltip.lines == 3
+            and _G.GameTooltip.lines[3] == "AH  Price: " .. tocAddonTable.Formatter.FormatTooltipMoney(97057),
+        "Hovering crafted item directly displays standard 'AH  Price:' line"
+    )
+
+    -- H. Passive TSM harvesting when hovering a recipe while showTooltip is OFF caches BOTH recipe and crafted item accurately
+    PCF_DB.prices[12699] = nil
+    PCF_DB.prices[12645] = nil
+    PCF_DB.settings.showTooltip = false
+    _G.TSM_API = {
+        GetCustomPriceValue = function(source, itemStr)
+            if type(itemStr) == "string" then
+                if itemStr:find("12699") then return 510000 end
+                if itemStr:find("12645") then return 98500 end
+            end
+            return nil
+        end,
+    }
+    PopulateRecipeTooltipLines()
+    _G.GameTooltip.itemName = "Thorium Shield Spike"
+    _G.GameTooltip.itemLink = spikeLink
+    tocAddonTable.Tooltip.OnTooltipSetItem(_G.GameTooltip, { id = 12699, hyperlink = plansLink })
+    Assert(#_G.GameTooltip.lines == 9, "Suppress both tooltip lines when showTooltip is OFF")
+    Assert(
+        PCF_DB.prices[12699] and PCF_DB.prices[12699].minBuyout == 510000
+            and PCF_DB.prices[12645] and PCF_DB.prices[12645].minBuyout == 98500,
+        "Passively harvest both recipe and crafted item prices under their distinct item IDs when hovering a recipe"
+    )
+
+    PCF_DB.prices[12699] = nil
+    PCF_DB.prices[12645] = nil
+    PCF_DB.prices[16242] = nil
+    PCF_DB.settings.showTooltip = savedShowTooltip
+    _G.TSM_API = savedTSM
+    _G.Auctionator = savedAuc
+    _G.C_Item = savedCItem
+    _G.C_Container = savedCContainer
+end
+
 print("\n--- All Unit Tests Passed Successfully ---")

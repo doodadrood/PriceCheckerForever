@@ -10,6 +10,23 @@ local Mock = {
 
 _G.SlashCmdList = _G.SlashCmdList or {}
 
+_G.hooksecurefunc = function(tbl, funcName, hookFn)
+    if type(tbl) == "string" then
+        hookFn = funcName
+        funcName = tbl
+        tbl = _G
+    end
+    if type(tbl) ~= "table" or type(tbl[funcName]) ~= "function" or type(hookFn) ~= "function" then
+        return
+    end
+    local orig = tbl[funcName]
+    tbl[funcName] = function(...)
+        local r1, r2, r3, r4 = orig(...)
+        hookFn(...)
+        return r1, r2, r3, r4
+    end
+end
+
 _G.GetTime = function() return Mock.currentTime end
 _G.time = function() return math.floor(Mock.currentTime) end
 _G.UnitName = function(unit) return unit == "player" and "LocalPlayer" or "TargetPlayer" end
@@ -84,12 +101,31 @@ _G.CreateFrame = function(frameType, name, parent, template)
     function frame:GetOwner() return self.owner end
     function frame:ClearLines()
         self._pcfStackCount = nil
+        self.itemName = nil
+        self.itemLink = nil
+        self.primaryTooltipData = nil
         if self.name then
             for i = 1, #self.lines do
                 _G[self.name .. "TextLeft" .. i] = nil
             end
         end
         self.lines = {}
+        if self.scripts["OnTooltipCleared"] then
+            self.scripts["OnTooltipCleared"](self)
+        end
+    end
+    function frame:GetPrimaryTooltipData()
+        return self.primaryTooltipData
+    end
+    function frame:SetHyperlink(link)
+        if self.scripts["OnTooltipSetItem"] then
+            self.scripts["OnTooltipSetItem"](self)
+        end
+    end
+    function frame:SetBagItem(bag, slot)
+        if self.scripts["OnTooltipSetItem"] then
+            self.scripts["OnTooltipSetItem"](self)
+        end
     end
     function frame:AddLine(text)
         table.insert(self.lines, text)
